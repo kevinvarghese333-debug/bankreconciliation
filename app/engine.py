@@ -48,6 +48,7 @@ def book_item(r: dict) -> dict:
         "side": "book", "dir": "out" if r["payment"] else "in",
         "date": r["date"], "amount": r["payment"] or r["receipt"],
         "name": r["name"], "ref": r["instrument"], "l4": r["l4"], "instr_no": r["instr_no"],
+        "instr_date": r.get("instr_date", ""),
         "loan_ac": r["loan_ac"], "loan_type": r["loan_type"], "vno": r["vno"], "vtype": r["vtype"],
         "branch": r["branch"], "accounts": r["accounts"], "narration": r["narration"], "notes": r["notes"],
         "text": " ".join([r["narration"], r["instrument"], r["notes"], r["remarks"]]),
@@ -92,6 +93,25 @@ def net_open(items: list[dict]) -> float:
         else:
             t += i["amount"] if i["dir"] == "in" else -i["amount"]
     return round(t, 2)
+
+
+def holiday_dates(conn, account_id: int, upto_run: int) -> set:
+    """Days the branches were closed, for every date reconciled up to `upto_run`.
+
+    A day is a holiday when it is a Sunday, or when the ERP bank book has no entries dated that day
+    (public bank holidays). Money that reaches the bank on a holiday is booked on the next working day,
+    so it is held open until that day's bank book has been reconciled.
+    """
+    covered = set()
+    for r in conn.execute("SELECT period_from, period_to FROM runs WHERE account_id=? AND id<=?",
+                          (account_id, upto_run)):
+        d, end = date.fromisoformat(r["period_from"]), date.fromisoformat(r["period_to"])
+        while d <= end:
+            covered.add(d)
+            d += timedelta(days=1)
+    booked = {date.fromisoformat(r["date"]) for r in conn.execute(
+        "SELECT DISTINCT date FROM items WHERE account_id=? AND side='book' AND run_id<=?", (account_id, upto_run))}
+    return {d for d in covered if d.weekday() == 6 or d not in booked}
 
 
 def latest_run(conn, account_id: int):
@@ -271,7 +291,8 @@ def _reconcile(conn, account_id, bank_path, bank_name, book_path, book_name, use
 
         bank_items = [i for i in carried + new_items if i["side"] == "bank"]
         book_items = [i for i in carried + new_items if i["side"] == "book"]
-        matches = Matcher(bank_items, book_items, window_days=WINDOW_DAYS).run()
+        matches = Matcher(bank_items, book_items, window_days=WINDOW_DAYS,
+                          holidays=holiday_dates(conn, account_id, run_id)).run()
         for m in matches:
             carried_keys = [k for k in (*m["bank"], *m["book"]) if any(c["key"] == k for c in carried)]
             note = m["note"]
@@ -368,12 +389,13 @@ def refresh_run(conn, run_id: int) -> None:
     bank_u = [i for i in universe if i["side"] == "bank"]
     book_u = [i for i in universe if i["side"] == "book"]
     as_of = date.fromisoformat(run["period_to"])
-    flags = build_flags(bank_u, book_u, mlist, acc["kind"], as_of, aged_days=AGED_DAYS)
+    holidays = holiday_dates(conn, run["account_id"], run_id)
+    flags = build_flags(bank_u, book_u, mlist, acc["kind"], as_of, aged_days=AGED_DAYS, holidays=holidays)
     flags = history_flags(conn, run, [i for i in items if i["run_id"] == run_id]) + flags
     brs = compute_brs(run["book_close"], run["bank_close"],
                       [o for o in open_now if o["side"] == "bank"],
                       [o for o in open_now if o["side"] == "book"],
-                      cumulative_opening_diff(conn, run["account_id"], run_id))
+                      cumulative_opening_diff(conn, run["account_id"], run_id), holidays=holidays)
     if abs(brs["opening_diff"]) > TOL:
         flags.insert(0, {"severity": "critical", "code": "UNEXPLAINED_DIFFERENCE",
                          "title": f"Unexplained difference of ₹{inr(brs['opening_diff'])} carried in the BRS",
@@ -399,6 +421,9 @@ def refresh_run(conn, run_id: int) -> None:
         "open_items": len(open_now),
         "carried_cleared": sum(1 for i in items if i["run_id"] != run_id),
         "severity": {s: sum(1 for f in flags if f["severity"] == s) for s in ("critical", "high", "medium", "info")},
+        # the run's own dates that were holidays (Sunday or no bank book entries)
+        "holidays": sorted(d.isoformat() for d in holidays
+                           if date.fromisoformat(run["period_from"]) <= d <= as_of),
     }
     conn.execute("UPDATE runs SET flags_json=?, brs_json=?, summary_json=? WHERE id=?",
                  (db.dumps(flags), db.dumps(brs), db.dumps(summary), run_id))

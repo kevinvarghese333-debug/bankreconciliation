@@ -42,7 +42,7 @@ def write_book(path, d: date, opening: float, entries: list[dict], company="Free
             f"Direct Pay, A/c: PERS, A/c No: {e.get('loan_ac','')}, Name: {e['name']}" if e.get("payment")
             else f"Received against loan, A/c: JLGL, A/c No: {e.get('loan_ac','')}, Name: {e['name']}")
         ws.append([3, "North Paravur", None, d, e["vno"], e.get("vtype", "BP" if e.get("payment") else "BR"),
-                   "x", (f"{e['instr']}, Dt.:{d:%d-%b-%Y}" if e.get("instr") else None), narr, "",
+                   "x", (f"{e['instr']}, Dt.:{e.get('instr_date', d):%d-%b-%Y}" if e.get("instr") else None), narr, "",
                    e.get("receipt", 0), e.get("payment", 0), bal, ""])
     ws.append([3, "North Paravur", None, d, None, None, None, None, "Total", None,
                round(opening + dr, 2), round(cr, 2), None, " - "])

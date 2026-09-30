@@ -66,7 +66,7 @@ def test_real_sample_tallies(conn):
 
 
 def test_carry_forward_and_exceptions(conn, tmp_path):
-    d1, d2 = date(2026, 9, 27), date(2026, 9, 28)
+    d1, d2 = date(2026, 9, 28), date(2026, 9, 29)
     op = 1_000_000.00
     # Day 1: A paid & debited; B booked but bank debits tomorrow; bank charge not booked; UPI collection
     bank1 = tmp_path / "b1.xlsx"
@@ -124,13 +124,13 @@ def test_carry_forward_and_exceptions(conn, tmp_path):
 def test_tampered_statement_blocked(conn, tmp_path):
     import openpyxl
     bank = tmp_path / "b.xlsx"
-    write_statement(bank, date(2026, 9, 27), 1000.0,
+    write_statement(bank, date(2026, 9, 28), 1000.0,
                     [("RAP/1/ 1 /A/", 100, 0), ("RAP/2/ 2 /X/", 50, 0), ("RAP/3/ 3 /B/", 200, 0)])
     wb = openpyxl.load_workbook(bank)
     wb.active.delete_rows(3)  # quietly remove the middle transaction
     wb.save(bank)
     book = tmp_path / "k.xlsx"
-    write_book(book, date(2026, 9, 27), 1000.0, [dict(vno=1, name="B", payment=200)])
+    write_book(book, date(2026, 9, 28), 1000.0, [dict(vno=1, name="B", payment=200)])
     with pytest.raises(engine.Blocked) as e:
         run(conn, 1, bank, book)
     assert any(c["code"] == "BANK_BALANCE_BREAK" and c["level"] == "error" for c in e.value.checks)
@@ -138,7 +138,7 @@ def test_tampered_statement_blocked(conn, tmp_path):
 
 
 def test_continuity_break_needs_ack(conn, tmp_path):
-    d1, d2 = date(2026, 9, 27), date(2026, 9, 29)
+    d1, d2 = date(2026, 9, 28), date(2026, 9, 30)
     b1, k1 = tmp_path / "b1.xlsx", tmp_path / "k1.xlsx"
     write_statement(b1, d1, 5000, [("RAP/1/ 1 /A/", 100, 0)])
     write_book(k1, d1, 5000, [dict(vno=1, name="A", payment=100)])
@@ -153,7 +153,7 @@ def test_continuity_break_needs_ack(conn, tmp_path):
 
 
 def test_book_backdated_entry_needs_reason_and_stays_critical(conn, tmp_path):
-    d1, d2 = date(2026, 9, 27), date(2026, 9, 28)
+    d1, d2 = date(2026, 9, 28), date(2026, 9, 29)
     b1, k1 = tmp_path / "b1.xlsx", tmp_path / "k1.xlsx"
     bc = write_statement(b1, d1, 5000, [("RAP/1/ 1 /ANU/", 100, 0)])
     kc = write_book(k1, d1, 5000, [dict(vno=1, name="ANU", payment=100)])
@@ -166,7 +166,7 @@ def test_book_backdated_entry_needs_reason_and_stays_critical(conn, tmp_path):
     assert "BOOK_CONTINUITY" in {c["code"] for c in e.value.ackable}
     with pytest.raises(engine.Blocked):
         run(conn, 1, b2, k2, acknowledged=True, ack_reason=".")          # too short
-    rid = run(conn, 1, b2, k2, acknowledged=True, ack_reason="Back-dated JV 27-09 for ₹700, to be traced")
+    rid = run(conn, 1, b2, k2, acknowledged=True, ack_reason="Back-dated JV 28-09 for ₹700, to be traced")
     b = brs(conn, rid)
     assert b["tallies"] and not b["clean"] and b["opening_diff"] == 700
     assert codes(conn, rid)[0] == "UNEXPLAINED_DIFFERENCE"
@@ -174,7 +174,7 @@ def test_book_backdated_entry_needs_reason_and_stays_critical(conn, tmp_path):
 
 
 def test_collection_account_outflows(conn, tmp_path):
-    d = date(2026, 9, 27)
+    d = date(2026, 9, 28)
     b, k = tmp_path / "b.xlsx", tmp_path / "k.xlsx"
     write_statement(b, d, 0, [
         ("UPI/SBIN/626900001111/SHEEBA JOY/UPI/x/s@ok", 0, 800),
@@ -196,7 +196,7 @@ def test_collection_account_outflows(conn, tmp_path):
 
 
 def test_manual_match_and_unmatch(conn, tmp_path):
-    d = date(2026, 9, 27)
+    d = date(2026, 9, 28)
     b, k = tmp_path / "b.xlsx", tmp_path / "k.xlsx"
     write_statement(b, d, 1000, [("RAP/1/ 1 /TOTALLY DIFFERENT/", 100, 0), ("RAP/2/ 2 /OTHER/", 100, 0)])
     write_book(k, d, 1000, [dict(vno=1, name="PERSON A", payment=100), dict(vno=2, name="PERSON B", payment=100)])
@@ -215,7 +215,7 @@ def test_manual_match_and_unmatch(conn, tmp_path):
 
 
 def test_duplicate_payment_flag(conn, tmp_path):
-    d = date(2026, 9, 27)
+    d = date(2026, 9, 28)
     b, k = tmp_path / "b.xlsx", tmp_path / "k.xlsx"
     write_statement(b, d, 100000, [("RAP/1/ 1 /LILLY JOHNSON/", 15188, 0), ("RAP/2/ 2 /LILLY JOHNSON/", 15188, 0)])
     write_book(k, d, 100000, [dict(vno=1, name="LILLY JOHNSON", loan_ac="0034", payment=15188),
@@ -225,10 +225,10 @@ def test_duplicate_payment_flag(conn, tmp_path):
     assert "DUP_LOAN_PAYMENT" in c and "DUP_BANK_PAYMENT" in c
 
 
-def _day(conn, tmp_path, tag, d, op, bank_rows, book_rows, acc=1, **kw):
+def _day(conn, tmp_path, tag, d, op, bank_rows, book_rows, acc=1, book_op=None, **kw):
     b, k = tmp_path / f"b{tag}.xlsx", tmp_path / f"k{tag}.xlsx"
     bc = write_statement(b, d, op, bank_rows)
-    kc = write_book(k, d, op, book_rows)
+    kc = write_book(k, d, op if book_op is None else book_op, book_rows)
     return run(conn, acc, b, k, **kw), bc, kc
 
 
@@ -242,14 +242,14 @@ def _conf(conn, rid, name):
 
 
 def test_different_person_same_amount_is_not_strong(conn, tmp_path):
-    rid, _, _ = _day(conn, tmp_path, 1, date(2026, 9, 27), 100000,
+    rid, _, _ = _day(conn, tmp_path, 1, date(2026, 9, 28), 100000,
                      [("RAP/626900000001/ 0000095001 /SUNIL KUMAR/", 50000, 0)],
                      [dict(vno=1, name="ANIL KUMAR", loan_ac="0001", payment=50000)])
     assert _conf(conn, rid, "ANIL KUMAR") in (None, "review")
 
 
 def test_tied_candidates_are_flagged_ambiguous(conn, tmp_path):
-    rid, _, _ = _day(conn, tmp_path, 1, date(2026, 9, 27), 100000,
+    rid, _, _ = _day(conn, tmp_path, 1, date(2026, 9, 28), 100000,
                      [("RAP/626900000001/ 0000095001 /THOMAS/", 20000, 0)],
                      [dict(vno=1, name="THOMAS VARGHESE", loan_ac="0001", payment=20000),
                       dict(vno=2, name="THOMAS K J", loan_ac="0002", payment=20000)])
@@ -258,40 +258,41 @@ def test_tied_candidates_are_flagged_ambiguous(conn, tmp_path):
 
 
 def test_reference_fragment_does_not_clear(conn, tmp_path):
-    d1 = date(2026, 9, 27)
+    d1 = date(2026, 9, 28)
     r1, bc, kc = _day(conn, tmp_path, 1, d1, 100000, [("RAP/1/ 1 /X/", 1, 0)],
                       [dict(vno=1, name="X", payment=1), dict(vno=2, name="BINDU", loan_ac="00030400600000000700", payment=25000)])
     b2, k2 = tmp_path / "b2.xlsx", tmp_path / "k2.xlsx"
-    write_statement(b2, date(2026, 9, 28), bc, [("CLG/000700/UNKNOWN PERSON/", 25000, 0)])
-    write_book(k2, date(2026, 9, 28), kc, [])
+    write_statement(b2, date(2026, 9, 29), bc, [("CLG/000700/UNKNOWN PERSON/", 25000, 0)])
+    write_book(k2, date(2026, 9, 29), kc, [])
     r2 = run(conn, 1, b2, k2)
     assert _conf(conn, r2, "BINDU") in (None, "review")
 
 
 def test_carried_payment_not_cleared_by_unrelated_debit(conn, tmp_path):
-    r1, bc, kc = _day(conn, tmp_path, 1, date(2026, 9, 27), 100000, [("RAP/1/ 1 /X/", 1, 0)],
+    r1, bc, kc = _day(conn, tmp_path, 1, date(2026, 9, 28), 100000, [("RAP/1/ 1 /X/", 1, 0)],
                       [dict(vno=1, name="X", payment=1), dict(vno=2, name="BINDU RAJAN", payment=30000)])
     b2, k2 = tmp_path / "b2.xlsx", tmp_path / "k2.xlsx"
-    write_statement(b2, date(2026, 9, 28), bc, [("RAP/2/ 2 /SURESH MENON/", 30000, 0)])
-    write_book(k2, date(2026, 9, 28), kc, [])
+    write_statement(b2, date(2026, 9, 29), bc, [("RAP/2/ 2 /SURESH MENON/", 30000, 0),
+                                                 ("UPI/SBIN/626900007777/TOM/UPI/x/p@ok", 0, 250)])
+    write_book(k2, date(2026, 9, 29), kc, [dict(vno=3, name="TOM", loan_ac="07", instr="7777", receipt=250)])
     r2 = run(conn, 1, b2, k2)
     assert _conf(conn, r2, "BINDU RAJAN") is None
     assert "BANK_DEBIT_NOT_IN_BOOK" in codes(conn, r2)
 
 
 def test_double_disbursal_across_days(conn, tmp_path):
-    r1, bc, kc = _day(conn, tmp_path, 1, date(2026, 9, 27), 100000, [("RAP/1/ 1 /LILLY JOHNSON/", 15188, 0)],
+    r1, bc, kc = _day(conn, tmp_path, 1, date(2026, 9, 28), 100000, [("RAP/1/ 1 /LILLY JOHNSON/", 15188, 0)],
                       [dict(vno=1, name="LILLY JOHNSON", loan_ac="0034", payment=15188)])
     b2, k2 = tmp_path / "b2.xlsx", tmp_path / "k2.xlsx"
-    write_statement(b2, date(2026, 9, 28), bc, [("RAP/2/ 2 /LILLY JOHNSON/", 15188, 0)])
-    write_book(k2, date(2026, 9, 28), kc, [dict(vno=2, name="LILLY JOHNSON", loan_ac="0034", payment=15188)])
+    write_statement(b2, date(2026, 9, 29), bc, [("RAP/2/ 2 /LILLY JOHNSON/", 15188, 0)])
+    write_book(k2, date(2026, 9, 29), kc, [dict(vno=2, name="LILLY JOHNSON", loan_ac="0034", payment=15188)])
     r2 = run(conn, 1, b2, k2)
     c = codes(conn, r2)
     assert "DUP_LOAN_PAYMENT_HISTORY" in c and "DUP_BANK_PAYMENT_HISTORY" in c
 
 
 def test_single_fake_receipt_not_pooled(conn, tmp_path):
-    rid, _, _ = _day(conn, tmp_path, 1, date(2026, 9, 27), 1000,
+    rid, _, _ = _day(conn, tmp_path, 1, date(2026, 9, 28), 1000,
                      [("UPI/SBIN/626900001111/ABDUL RAHIM/UPI/x/a@ok", 0, 1000)],
                      [dict(vno=1, name="SUMA K", instr="4321", receipt=1000)])
     assert "BOOK_RECEIPT_NOT_IN_BANK" in codes(conn, rid)
@@ -301,9 +302,9 @@ def test_branch_without_totals_rejected(tmp_path):
     import openpyxl
     from app.parsers import parse_bank_book
     k = tmp_path / "k.xlsx"
-    write_book(k, date(2026, 9, 27), 1000, [dict(vno=1, name="A", payment=100)])
+    write_book(k, date(2026, 9, 28), 1000, [dict(vno=1, name="A", payment=100)])
     wb = openpyxl.load_workbook(k)
-    wb.active.append([9, "Ghost Branch", None, date(2026, 9, 27), 777, "BP", "x", None,
+    wb.active.append([9, "Ghost Branch", None, date(2026, 9, 28), 777, "BP", "x", None,
                       "Direct Pay, A/c: PERS, A/c No: 1, Name: SURESH", "", 0, 40000, None, ""])
     wb.save(k)
     assert not parse_bank_book(k)["ok"]
@@ -387,3 +388,90 @@ def test_new_narrations_and_sweeps(conn, tmp_path):
     methods = [m["method"] for m in conn.execute("SELECT method FROM matches WHERE run_id=?", (rid,))]
     assert sum(m.startswith("Sweep from branch") for m in methods) == 33
     assert "RAP_RETURNED" in codes(conn, rid)
+
+
+def _upi(ref, name, amt):
+    return (f"UPI/SBIN/{ref}/{name}/UPI/x/p@ok", 0, amt)
+
+
+def test_sunday_receipts_booked_on_monday(conn, tmp_path):
+    sat, sun, mon = date(2026, 9, 26), date(2026, 9, 27), date(2026, 9, 28)
+    r1, bc, kc = _day(conn, tmp_path, 1, sat, 100000,
+                      [_upi("626900001234", "ANU", 500)],
+                      [dict(vno=1, name="ANU", loan_ac="01", instr="1234", receipt=500)])
+    # Sunday: three UPIs reach the bank; branches closed, ERP bank book has no entries
+    r2, bc, kc2 = _day(conn, tmp_path, 2, sun, bc,
+                       [_upi("626900001111", "ASHA MOL", 800), _upi("626900002222", "BINDU RAJ", 500),
+                        _upi("626900003333", "CHINNU K", 700)], [], book_op=kc)
+    assert kc2 == kc
+    b = brs(conn, r2)
+    assert b["tallies"] and b["c_holiday"] == 2000 and b["c_holiday_count"] == 3
+    c = codes(conn, r2)
+    assert "HOLIDAY_RECEIPTS_PENDING" in c and "BANK_CREDIT_NOT_IN_BOOK" not in c
+    assert not [f for f in flags(conn, r2) if f["severity"] == "critical"]
+    s = json.loads(conn.execute("SELECT summary_json FROM runs WHERE id=?", (r2,)).fetchone()[0])
+    assert s["holidays"] == ["2026-09-27"]
+    # Monday: ASHA booked with the Sunday instrument date, BINDU with Monday's date, CHINNU not booked
+    r3, _, _ = _day(conn, tmp_path, 3, mon, bc, [_upi("626900004444", "DEVI S", 900)], book_op=kc, book_rows=[
+        dict(vno=2, name="DEVI S", loan_ac="04", instr="4444", receipt=900),
+        dict(vno=3, name="ASHA MOL", loan_ac="02", instr="1111", instr_date=sun, receipt=800),
+        dict(vno=4, name="BINDU RAJ", loan_ac="03", instr="2222", receipt=500),
+    ])
+    b = brs(conn, r3)
+    assert b["tallies"] and b["add_bank_credits_not_in_book"] == 700
+    fl = flags(conn, r3)
+    crit = [f for f in fl if f["code"] == "HOLIDAY_RECEIPT_NOT_BOOKED"]
+    assert len(crit) == 1 and crit[0]["severity"] == "critical"
+    assert "27-09-2026" in crit[0]["detail"] and "CHINNU" in crit[0]["detail"]
+    booked = [f for f in fl if f["code"] == "HOLIDAY_RECEIPTS_BOOKED"]
+    assert booked and booked[0]["severity"] == "medium" and "BINDU" in booked[0]["detail"]
+    assert "HOLIDAY_RECEIPTS_PENDING" not in [f["code"] for f in fl]
+
+
+def test_public_holiday_and_backdated_sunday_entry(conn, tmp_path):
+    tue, wed, thu = date(2026, 9, 29), date(2026, 9, 30), date(2026, 10, 1)
+    r1, bc, kc = _day(conn, tmp_path, 1, tue, 100000, [_upi("626900001234", "ANU", 500)],
+                      [dict(vno=1, name="ANU", loan_ac="01", instr="1234", receipt=500)])
+    # Wednesday: a bank holiday — nothing in the bank book, one UPI and one sweep-like debit arrive
+    r2, bc, kc = _day(conn, tmp_path, 2, wed, bc,
+                     [_upi("626900005555", "ELSY", 1200), ("TR FROM CHERAI BRANCH 58.73.1137", 300, 0)], [], book_op=kc)
+    c = codes(conn, r2)
+    assert "HOLIDAY_RECEIPTS_PENDING" in c and "HOLIDAY_DEBIT_PENDING" in c
+    assert "BANK_DEBIT_NOT_IN_BOOK" not in c
+    # Thursday: neither is booked -> both critical, citing the holiday date
+    r3, _, _ = _day(conn, tmp_path, 3, thu, bc, [_upi("626900006666", "FEMY", 100)],
+                    [dict(vno=2, name="FEMY", loan_ac="06", instr="6666", receipt=100)], book_op=kc)
+    fl = {f["code"]: f for f in flags(conn, r3)}
+    assert fl["HOLIDAY_RECEIPT_NOT_BOOKED"]["severity"] == "critical"
+    assert "30-09-2026" in fl["HOLIDAY_RECEIPT_NOT_BOOKED"]["detail"]
+    assert fl["HOLIDAY_DEBIT_NOT_BOOKED"]["severity"] == "critical"
+
+
+def test_book_entry_dated_sunday_is_flagged(conn, tmp_path):
+    sun = date(2026, 9, 27)
+    rid, _, _ = _day(conn, tmp_path, 1, sun, 100000, [_upi("626900001111", "ASHA MOL", 800)],
+                     [dict(vno=9, name="ASHA MOL", loan_ac="02", instr="1111", receipt=800)])
+    f = [x for x in flags(conn, rid) if x["code"] == "BOOK_ENTRY_ON_SUNDAY"]
+    assert f and f[0]["severity"] == "high" and "Vchr 9" in f[0]["detail"]
+
+
+def test_holiday_run_pages_render(conn, tmp_path):
+    import re
+    from io import BytesIO
+    import openpyxl
+    from fastapi.testclient import TestClient
+    from app.main import app
+    sat, sun = date(2026, 9, 26), date(2026, 9, 27)
+    _, bc, kc = _day(conn, tmp_path, 1, sat, 100000, [_upi("626900001234", "ANU", 500)],
+                     [dict(vno=1, name="ANU", loan_ac="01", instr="1234", receipt=500)])
+    r2, _, _ = _day(conn, tmp_path, 2, sun, bc, [_upi("626900001111", "ASHA MOL", 800)], [], book_op=kc)
+    c = TestClient(app, follow_redirects=False)
+    tok = re.search(r'name="csrf_token" value="([^"]+)"', c.get("/setup").text).group(1)
+    c.post("/setup", data={"username": "kev", "password": "abcdefghijk1", "password2": "abcdefghijk1", "csrf_token": tok})
+    page = c.get(f"/runs/{r2}")
+    assert page.status_code == 200 and "is a holiday" in page.text and "received on a holiday" in page.text
+    x = c.get(f"/runs/{r2}/excel")
+    assert x.status_code == 200
+    wb = openpyxl.load_workbook(BytesIO(x.content))
+    assert "holiday" in wb["BRS"]["A13"].value
+    assert any("Holiday: received Sun 27-09-2026" == (r[10].value or "") for r in wb["Open Items"].iter_rows(min_row=4))

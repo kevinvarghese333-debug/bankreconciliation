@@ -89,22 +89,26 @@ def build_report(conn, run_id: int) -> tuple[bytes, str]:
     wo = wb.active
     wo.title = "Open Items"
     wo["A1"], wo["A1"].font = f"Open (unreconciled) items as at {as_of:%d-%m-%Y} — {title_acc}", FB
+    from .engine import holiday_dates
+    hols = holiday_dates(conn, run["account_id"], run_id)
     r = _table(wo, 3, ["Category", "Side", "Date", "Days open", "Vchr / Sl", "Name", "Details", "Amount",
-                       "Carried from run", "Note"], [46, 7, 12, 10, 12, 28, 60, 16, 12, 30])
+                       "Carried from run", "Note", "Holiday"], [46, 7, 12, 10, 12, 28, 60, 16, 12, 30, 34])
     first = r
     for it in sorted(open_, key=lambda i: (CAT[(i["side"], i["dir"])], i["date"])):
         _put(wo, r, [CAT[(it["side"], it["dir"])], it["side"].title(), it["date"], (as_of - it["date"]).days,
                      it.get("vno") or it.get("sl", ""), it["name"],
                      it.get("narration") or it.get("text", ""), it["amount"],
-                     f"#{it['run_id']}" if it["run_id"] != run_id else "", it.get("note", "")],
+                     f"#{it['run_id']}" if it["run_id"] != run_id else "", it.get("note", ""),
+                     (f"Holiday: received {it['date']:%a %d-%m-%Y}" if it["side"] == "bank" and it["date"] in hols else "")],
              amount_cols=(8,), date_cols=(3,))
         r += 1
     last = max(r - 1, first)
     if not open_:
-        _put(wo, r, ["No open items — every line is matched."] + [""] * 9)
+        _put(wo, r, ["No open items — every line is matched."] + [""] * 10)
         last = r
     cat_rng = f"'Open Items'!$A${first}:$A${last}"
     amt_rng = f"'Open Items'!$H${first}:$H${last}"
+    hol_rng = f"'Open Items'!$K${first}:$K${last}"
 
     # ------------------------------------------------------------------ BRS (first tab)
     ws = wb.create_sheet("BRS", 0)
@@ -133,6 +137,11 @@ def build_report(conn, run_id: int) -> tuple[bytes, str]:
         else:
             c.value = val
         c.number_format, c.font = INR, F
+    ws["A13"], ws["A13"].font = "      of which received on a holiday (due in next working day's book) — memo", FS
+    ws["B13"] = f'=COUNTIFS({cat_rng},"C ·*",{hol_rng},"Holiday*")'
+    ws["C13"] = f'=SUMIFS({amt_rng},{cat_rng},"C ·*",{hol_rng},"Holiday*")'
+    ws["B13"].font = ws["C13"].font = FS
+    ws["C13"].number_format = INR
     ws["A14"], ws["A14"].font = "Balance as per bank statement (computed)", FB
     ws["C14"] = "=C7+C8-C9+C10-C11+C12"
     ws["A15"], ws["A15"].font = "Balance as per bank statement (actual)", FB

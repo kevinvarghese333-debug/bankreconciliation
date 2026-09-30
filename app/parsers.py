@@ -386,6 +386,9 @@ PERIOD_RE = re.compile(r"from\s+(\d{1,2}[-/]\d{1,2}[-/]\d{2,4})\s+to\s+(\d{1,2}[
 SUMMARY_WORDS = {"opening", "total", "closing"}
 
 
+INSTR_DATE_RE = re.compile(r"Dt\.?\s*:?\s*(\d{1,2}[-/ ][A-Za-z]{3}[-/ ]\d{2,4}|\d{1,2}[-/]\d{1,2}[-/]\d{2,4})")
+
+
 def parse_bank_book(path: str | Path) -> dict:
     checks: list[dict] = []
     df = read_sheet(path)
@@ -472,6 +475,8 @@ def parse_bank_book(path: str | Path) -> dict:
         vno = str(int(vno)) if isinstance(vno, float) else str(vno)
         instr = str(cell(r, "instr")).strip()
         instr_no = re.match(r"^\s*(\d{3,})", instr)
+        idm = INSTR_DATE_RE.search(instr)
+        instr_date = to_date(idm.group(1)) if idm else None
         nm = NAME_RE.search(narr)
         la = LOANAC_RE.search(narr)
         lt = LOANTYPE_RE.search(narr)
@@ -493,6 +498,7 @@ def parse_bank_book(path: str | Path) -> dict:
             "instrument": instr,
             "instr_no": instr_no.group(1) if instr_no else "",
             "l4": instr_no.group(1)[-4:] if instr_no else "",
+            "instr_date": instr_date.isoformat() if instr_date else "",
             "narration": narr,
             "notes": str(cell(r, "notes")),
             "receipt": dr,      # Debit in bank ledger = money into bank

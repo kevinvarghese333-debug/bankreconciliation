@@ -26,6 +26,7 @@
   </div>
 </div>
 
+{% if s.holidays %}<div class="flash ok" style="background:#FFF4CC;color:#7A5B00">🏖 {% for d in s.holidays %}{{ d | dmy }}{% if not loop.last %}, {% endif %}{% endfor %} {{ 'is a holiday' if s.holidays|length == 1 else 'are holidays' }} (Sunday, or no bank book entries). Money received is held for the next working day's bank book; anything not booked there is flagged Critical with the holiday date.</div>{% endif %}
 {% if not is_latest %}<div class="flash ok" style="background:var(--accent-soft);color:var(--accent)">This is an earlier run. Open items and BRS are shown as they stood at the end of this run; matching actions are only available on the latest run.</div>{% endif %}
 
 <div class="grid cards">
@@ -56,6 +57,7 @@
       <tr><td>Add: Payments entered in book, not yet debited by bank</td><td class="cnt">{{ brs.counts.a }} item(s)</td><td class="amt">{% if brs.add_book_payments_not_debited %}{{ brs.add_book_payments_not_debited | inr }}{% else %}—{% endif %}</td></tr>
       <tr><td>Less: Receipts entered in book, not yet credited by bank</td><td class="cnt">{{ brs.counts.b }} item(s)</td><td class="amt">{% if brs.less_book_receipts_not_credited %}({{ brs.less_book_receipts_not_credited | inr }}){% else %}—{% endif %}</td></tr>
       <tr><td>Add: Credits in bank statement, not entered in book</td><td class="cnt">{{ brs.counts.c }} item(s)</td><td class="amt">{% if brs.add_bank_credits_not_in_book %}{{ brs.add_bank_credits_not_in_book | inr }}{% else %}—{% endif %}</td></tr>
+      {% if brs.c_holiday_count %}<tr class="sub"><td style="padding-left:28px" class="muted">of which received on a holiday — due in the next working day's bank book</td><td class="cnt muted">{{ brs.c_holiday_count }} item(s)</td><td class="amt muted">{{ brs.c_holiday | inr }}</td></tr>{% endif %}
       <tr><td>Less: Debits in bank statement, not entered in book</td><td class="cnt">{{ brs.counts.d }} item(s)</td><td class="amt">{% if brs.less_bank_debits_not_in_book %}({{ brs.less_bank_debits_not_in_book | inr }}){% else %}—{% endif %}</td></tr>
       {% if brs.opening_diff %}<tr><td>Add/(Less): Opening difference, not itemised</td><td class="cnt"></td><td class="amt">{{ brs.opening_diff | inr }}</td></tr>{% endif %}
       <tr class="total"><td>Balance as per bank statement (computed)</td><td class="cnt"></td><td class="amt">{{ brs.computed_bank_balance | inr }}</td></tr>

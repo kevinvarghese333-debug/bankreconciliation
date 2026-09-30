@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import re
 from collections import defaultdict
+from datetime import timedelta
 
 from rapidfuzz import fuzz
 
@@ -147,7 +148,8 @@ def find_subset(target: float, items: list[dict], max_size: int = 6, max_items: 
 
 class Matcher:
     def __init__(self, bank: list[dict], book: list[dict], window_days: int = 7,
-                 pool_collections: bool = True):
+                 pool_collections: bool = True, holidays=frozenset()):
+        self.holidays = holidays
         self.bank = bank
         self.book = book
         self.window = window_days
@@ -242,20 +244,30 @@ class Matcher:
         match (review). Payers are often relatives and branch staff mistype UPI refs, so a
         one-to-one pairing is not provable — but the money agrees to the paisa."""
         banks = defaultdict(list)
+        held = defaultdict(list)     # credits from holidays, due in the next working day's book
         books = defaultdict(list)
         for b in self.free(self.bank, "in"):
-            if not b.get("carried"):
+            if b["date"] in self.holidays:
+                d = b["date"] + timedelta(days=1)
+                while d in self.holidays and (d - b["date"]).days < 10:
+                    d += timedelta(days=1)
+                held[d].append(b)
+            elif not b.get("carried"):
                 banks[b["date"]].append(b)
         for k in self.free(self.book, "in"):
             if not k.get("carried"):
                 books[k["date"]].append(k)
-        for d, bl in banks.items():
-            kl = books.get(d, [])
-            if len(bl) >= 2 and len(kl) >= 2 and same_amount(sum(i["amount"] for i in bl), sum(i["amount"] for i in kl)):
-                total = sum(i["amount"] for i in bl)
-                self.add(bl, kl, "Collections pooled by day total", "review",
-                         f"{len(bl)} bank credits and {len(kl)} book receipts on {d:%d-%m-%Y} could not be "
-                         f"paired one-to-one, but both total {total:,.2f}")
+        for d, kl in books.items():
+            for bl, extra in ((banks.get(d, []), ""), (banks.get(d, []) + held.get(d, []), " (with holiday receipts)")):
+                if extra and not held.get(d):
+                    continue
+                if len(bl) >= 2 and len(kl) >= 2 and same_amount(sum(i["amount"] for i in bl), sum(i["amount"] for i in kl)):
+                    total = sum(i["amount"] for i in bl)
+                    self.add(bl, kl, "Collections pooled by day total" + extra, "review",
+                             f"{len(bl)} bank credits and {len(kl)} book receipts for {d:%d-%m-%Y} could not be "
+                             f"paired one-to-one, but both total {total:,.2f}"
+                             + (". Includes money received on the preceding holiday." if extra else ""))
+                    break
 
     def reference_pass(self, direction):
         """Bank UTR / cheque number found as a whole number in the ERP entry (within the date window)."""
@@ -407,8 +419,26 @@ class Matcher:
 SEV_ORDER = {"critical": 0, "high": 1, "medium": 2, "info": 3}
 
 
+def day_label(d, holidays=()) -> str:
+    return f"{d:%a %d-%m-%Y}" + (" (Sunday)" if d.weekday() == 6 else " (holiday)" if d in holidays else "")
+
+
+def next_working_day(d, as_of, holidays):
+    """First reconciled day after `d` (up to `as_of`) that was not a holiday, or None if not reached yet."""
+    x = d + timedelta(days=1)
+    while x <= as_of:
+        if x not in holidays:
+            return x
+        x += timedelta(days=1)
+    return None
+
+
+def working_days_between(d, as_of, holidays) -> int:
+    return sum(1 for n in range(1, (as_of - d).days + 1) if d + timedelta(days=n) not in holidays)
+
+
 def build_flags(bank: list[dict], book: list[dict], matches: list[dict], account_type: str,
-                as_of, aged_days: int = 3) -> list[dict]:
+                as_of, aged_days: int = 3, holidays=frozenset()) -> list[dict]:
     from .parsers import inr
 
     flags: list[dict] = []
@@ -419,8 +449,33 @@ def build_flags(bank: list[dict], book: list[dict], matches: list[dict], account
         flags.append({"severity": sev, "code": code, "title": title, "detail": detail, "keys": list(keys)})
 
     # unmatched lines
+    waiting = defaultdict(list)          # holiday date -> credits waiting for the next working day's book
     for b in bank:
         if b["key"] in matched:
+            continue
+        if b["date"] in holidays:
+            hol = day_label(b["date"], holidays)
+            nwd = next_working_day(b["date"], as_of, holidays)
+            ref = f" · UTR {b['ref']}" if b.get("ref") else ""
+            who_ = b["name"] or b["text"][:60]
+            if nwd:
+                if b["dir"] == "in":
+                    f("critical", "HOLIDAY_RECEIPT_NOT_BOOKED",
+                      "Received on a holiday, not booked on the next working day",
+                      f"Fund reflected in the account on {hol} · ₹{inr(b['amount'])} · {who_}{ref}. "
+                      f"Not found in the bank book of {nwd:%a %d-%m-%Y}. Find which branch received it and why it "
+                      "was not posted.", [b["key"]])
+                else:
+                    f("critical", "HOLIDAY_DEBIT_NOT_BOOKED",
+                      "Debited on a holiday, not booked on the next working day",
+                      f"Money left the account on {hol} · ₹{inr(b['amount'])} · {who_}{ref}. "
+                      f"Not found in the bank book of {nwd:%a %d-%m-%Y}.", [b["key"]])
+            elif b["dir"] == "in":
+                waiting[b["date"]].append(b)
+            else:
+                f("high", "HOLIDAY_DEBIT_PENDING", "Debited on a holiday: must be booked on the next working day",
+                  f"Money left the account on {hol} · ₹{inr(b['amount'])} · {who_}{ref}. Branches are closed, so it "
+                  "is held until the next working day's bank book; if it is not there it turns Critical.", [b["key"]])
             continue
         if b["dir"] == "out":
             what = "Outflow from collection account" if account_type == "collection" else "Bank debit"
@@ -429,11 +484,17 @@ def build_flags(bank: list[dict], book: list[dict], matches: list[dict], account
         else:
             f("medium", "BANK_CREDIT_NOT_IN_BOOK", "Credit in bank not posted in bank book",
               f"{b['date']:%d-%m-%Y} · ₹{inr(b['amount'])} · {b['name']}", [b["key"]])
+    for d, bs in sorted(waiting.items()):
+        f("info", "HOLIDAY_RECEIPTS_PENDING",
+          f"{len(bs)} receipt(s) on {day_label(d, holidays)} waiting for the next working day's bank book",
+          f"₹{inr(sum(b['amount'] for b in bs))} reflected in the account on {day_label(d, holidays)}, when branches "
+          "were closed. They are matched against the next working day's bank book; any still missing then is "
+          "flagged Critical.", [b["key"] for b in bs])
     for k in book:
         if k["key"] in matched:
             continue
-        age = (as_of - k["date"]).days
-        aged = f" · open {age} day(s)" if age else ""
+        age = working_days_between(k["date"], as_of, holidays) if holidays else (as_of - k["date"]).days
+        aged = f" · open {age} working day(s)" if age else ""
         if k["dir"] == "out":
             f("critical" if age >= aged_days else "high", "BOOK_PAYMENT_NOT_IN_BANK",
               "Payment in bank book not debited by bank" + (" (aged)" if age >= aged_days else ""),
@@ -478,6 +539,56 @@ def build_flags(bank: list[dict], book: list[dict], matches: list[dict], account
           + "; ".join(f"{n} × {k}" for k, n in sorted(kinds.items(), key=lambda x: -x[1]))
           + ". Usually a relative paying for the borrower. Spot-check in the Collections tab → 'Only items to verify'.",
           [x for m, _ in soft_in for x in (*m["bank"], *m["book"])])
+
+    # entries dated on a Sunday: branches are closed, so they were most likely back-dated on Monday
+    on_sunday = defaultdict(list)
+    for k in book:
+        if not k.get("carried") and k["date"].weekday() == 6:
+            on_sunday[k["date"]].append(k)
+    for d, ks in sorted(on_sunday.items()):
+        rc = sum(k["amount"] for k in ks if k["dir"] == "in")
+        pm = sum(k["amount"] for k in ks if k["dir"] == "out")
+        f("high", "BOOK_ENTRY_ON_SUNDAY", f"{len(ks)} bank book entr(ies) dated {d:%a %d-%m-%Y} (Sunday)",
+          f"Branches are closed on Sundays, so these were probably posted later and back-dated. Receipts "
+          f"₹{inr(rc)}, payments ₹{inr(pm)}: " + ", ".join(f"Vchr {k['vno']} {k['name']}" for k in ks[:8])
+          + ". Check who posted them and when.", [k["key"] for k in ks])
+
+    # how receipts that arrived on a holiday were booked: the ERP instrument date should be the bank date
+    hol_in = []
+    for m in matches:
+        bs = [byk[x] for x in m["bank"] if x in byk]
+        ks = [byk[x] for x in m["book"] if x in byk]
+        if bs and ks and bs[0]["dir"] == "in" and any(b["date"] in holidays for b in bs):
+            hol_in.append((bs, ks))
+    if hol_in:
+        by_day = defaultdict(lambda: {"n": 0, "amt": 0.0, "ok": 0, "wrong": [], "none": 0, "booked": set()})
+        for bs, ks in hol_in:
+            hd = min(b["date"] for b in bs)
+            g = by_day[hd]
+            g["n"] += len(bs)
+            g["amt"] += sum(b["amount"] for b in bs)
+            for k in ks:
+                g["booked"].add(k["date"])
+                idt = k.get("instr_date") or ""
+                if not idt:
+                    g["none"] += 1
+                elif idt == hd.isoformat():
+                    g["ok"] += 1
+                else:
+                    g["wrong"].append(k)
+        for hd, g in sorted(by_day.items()):
+            booked = ", ".join(f"{x:%a %d-%m}" for x in sorted(g["booked"]))
+            parts = [f"{g['ok']} entr(ies) carry the correct instrument date {hd:%d-%m-%Y}"]
+            if g["wrong"]:
+                parts.append(f"{len(g['wrong'])} carry a different date ("
+                             + ", ".join(f"Vchr {k['vno']} {k['name']} Dt. {k['instr_date']}" for k in g["wrong"][:6]) + ")")
+            if g["none"]:
+                parts.append(f"{g['none']} have no instrument date")
+            f("medium" if g["wrong"] else "info", "HOLIDAY_RECEIPTS_BOOKED",
+              f"{g['n']} receipt(s) of {day_label(hd, holidays)} booked on {booked}",
+              f"₹{inr(g['amt'])} reflected in the account on {day_label(hd, holidays)} and booked on {booked}. "
+              + "; ".join(parts) + ".",
+              [x for bs, ks in hol_in if min(b["date"] for b in bs) == hd for x in (*[b["key"] for b in bs], *[k["key"] for k in ks])])
 
     # returned disbursals: the borrower was NOT paid, whatever the matching says
     for b in bank:
@@ -548,7 +659,7 @@ def build_flags(bank: list[dict], book: list[dict], matches: list[dict], account
 # ---------------------------------------------------------------------------- BRS
 
 def compute_brs(book_closing: float, bank_closing: float, open_bank: list[dict], open_book: list[dict],
-                opening_diff: float = 0.0) -> dict:
+                opening_diff: float = 0.0, holidays=frozenset()) -> dict:
     """Bank Reconciliation Statement, starting from balance as per bank book.
 
     Balance as per bank book
@@ -563,6 +674,7 @@ def compute_brs(book_closing: float, bank_closing: float, open_bank: list[dict],
     b = round(sum(i["amount"] for i in open_book if i["dir"] == "in"), 2)
     c = round(sum(i["amount"] for i in open_bank if i["dir"] == "in"), 2)
     d = round(sum(i["amount"] for i in open_bank if i["dir"] == "out"), 2)
+    hol = [i for i in open_bank if i["dir"] == "in" and i["date"] in holidays]
     computed = round(book_closing + a - b + c - d + opening_diff, 2)
     diff = round(bank_closing - computed, 2)
     return {
@@ -570,6 +682,8 @@ def compute_brs(book_closing: float, bank_closing: float, open_bank: list[dict],
         "add_book_payments_not_debited": a,
         "less_book_receipts_not_credited": b,
         "add_bank_credits_not_in_book": c,
+        "c_holiday": round(sum(i["amount"] for i in hol), 2),
+        "c_holiday_count": len(hol),
         "less_bank_debits_not_in_book": d,
         "opening_diff": opening_diff,
         "computed_bank_balance": computed,
