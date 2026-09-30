@@ -620,3 +620,17 @@ def test_signoff_maker_checker(conn, tmp_path):
     conn.execute("UPDATE runs SET checked_by='', created_by='kev' WHERE id=?", (rid,))
     admin.post(f"/runs/{rid}/signoff", data={"csrf_token": t})
     assert conn.execute("SELECT checked_by FROM runs WHERE id=?", (rid,)).fetchone()[0] == ""   # can't check own run
+
+
+def test_admin_short_url(monkeypatch):
+    import importlib
+    from fastapi.testclient import TestClient
+    import app.main as m
+    monkeypatch.setenv("ROOT_PATH", "/bankreco")
+    mm = importlib.reload(m)
+    try:
+        r = TestClient(mm.app, follow_redirects=False).get("/bankreco-admin")
+        assert r.status_code == 307 and r.headers["location"] == "/bankreco/admin"
+    finally:
+        monkeypatch.delenv("ROOT_PATH")
+        importlib.reload(m)
