@@ -90,6 +90,20 @@ CREATE TABLE IF NOT EXISTS holidays (
     created_at TEXT NOT NULL,
     created_by TEXT NOT NULL DEFAULT ''
 );
+CREATE TABLE IF NOT EXISTS revoked_runs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id INTEGER NOT NULL,
+    account_id INTEGER NOT NULL,
+    period_from TEXT NOT NULL,
+    period_to TEXT NOT NULL,
+    created_by TEXT DEFAULT '',
+    created_at TEXT DEFAULT '',
+    revoked_at TEXT NOT NULL,
+    revoked_by TEXT NOT NULL,
+    reason TEXT NOT NULL,
+    batch TEXT NOT NULL,
+    snapshot_json TEXT
+);
 CREATE TABLE IF NOT EXISTS settings (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL
@@ -131,9 +145,26 @@ def tx(conn: sqlite3.Connection):
         raise
 
 
+MIGRATIONS = [
+    # (table, column, definition)
+    ("users", "role", "TEXT NOT NULL DEFAULT 'admin'"),      # users created before roles existed were the owner
+    ("users", "full_name", "TEXT NOT NULL DEFAULT ''"),
+    ("users", "active", "INTEGER NOT NULL DEFAULT 1"),
+    ("users", "must_change_pw", "INTEGER NOT NULL DEFAULT 0"),
+    ("users", "last_login", "TEXT DEFAULT ''"),
+    ("runs", "checked_by", "TEXT DEFAULT ''"),
+    ("runs", "checked_at", "TEXT DEFAULT ''"),
+    ("runs", "checked_note", "TEXT DEFAULT ''"),
+]
+
+
 def init() -> None:
     conn = connect()
     conn.executescript(SCHEMA)
+    for table, col, ddl in MIGRATIONS:
+        cols = {r["name"] for r in conn.execute(f"PRAGMA table_info({table})")}
+        if col not in cols:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {ddl}")
     conn.close()
 
 

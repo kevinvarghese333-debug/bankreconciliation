@@ -11,7 +11,7 @@
   holiday even if it isn't listed here. Adding it here also names it and enables the back-dating check.
 </div>
 
-<details class="panel" {{ 'open' if not rows }}>
+{% if can('holidays') %}<details class="panel" {{ 'open' if not rows }}>
   <summary>Add holidays</summary>
   <form method="post" action="{{ base }}/holidays" style="margin-top:12px">
     <input type="hidden" name="csrf_token" value="{{ csrf }}">
@@ -22,7 +22,7 @@
     </div>
     <button class="btn primary">Save holidays</button>
   </form>
-</details>
+</details>{% endif %}
 
 <div class="panel tight">
 {% if not rows %}<div class="empty">No bank holidays listed yet. Sundays are always treated as holidays.</div>{% else %}
@@ -35,12 +35,12 @@
     <td>{{ r.date.strftime('%A') }}{% if r.date.weekday() == 6 %} <span class="pill neutral">already a Sunday</span>{% endif %}</td>
     <td>{{ r.name or '—' }}</td>
     <td class="small muted">{{ r.created_by }} · {{ r.created_at }}</td>
-    <td class="num">
+    <td class="num">{% if can('holidays') %}
       <form method="post" action="{{ base }}/holidays/delete" style="display:inline">
         <input type="hidden" name="csrf_token" value="{{ csrf }}">
         <input type="hidden" name="day" value="{{ r.day }}">
         <button class="btn small danger">Remove</button>
-      </form>
+      </form>{% endif %}
     </td>
   </tr>
   {% endfor %}

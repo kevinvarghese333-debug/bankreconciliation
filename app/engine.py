@@ -504,6 +504,14 @@ def add_note(conn, item_id: int, note: str, user: str) -> None:
         db.audit(conn, user, "note", f"Item #{item_id}: {note.strip()}")
 
 
+def _delete_run(conn, run_id: int) -> None:
+    """Remove a run, its matches and items; items it cleared from earlier days become open again."""
+    conn.execute("UPDATE items SET match_id=NULL WHERE match_id IN (SELECT id FROM matches WHERE run_id=?)", (run_id,))
+    conn.execute("DELETE FROM matches WHERE run_id=?", (run_id,))
+    conn.execute("DELETE FROM items WHERE run_id=?", (run_id,))
+    conn.execute("DELETE FROM runs WHERE id=?", (run_id,))
+
+
 def undo_run(conn, run_id: int, user: str) -> None:
     run = conn.execute("SELECT * FROM runs WHERE id=?", (run_id,)).fetchone()
     if not run:
@@ -512,11 +520,54 @@ def undo_run(conn, run_id: int, user: str) -> None:
     if last["id"] != run_id:
         raise ValueError("Only the latest reconciliation for an account can be undone. Undo later runs first.")
     with db.tx(conn):
-        conn.execute("UPDATE items SET match_id=NULL WHERE match_id IN (SELECT id FROM matches WHERE run_id=?)", (run_id,))
-        conn.execute("DELETE FROM matches WHERE run_id=?", (run_id,))
-        conn.execute("DELETE FROM items WHERE run_id=?", (run_id,))
-        conn.execute("DELETE FROM runs WHERE id=?", (run_id,))
+        _delete_run(conn, run_id)
         prev = latest_run(conn, run["account_id"])
         if prev:
             refresh_run(conn, prev["id"])
         db.audit(conn, user, "undo_run", f"Run #{run_id} ({run['period_from']}..{run['period_to']}) undone")
+
+
+def runs_to_revoke(conn, account_ids: list[int], from_date: date) -> list[dict]:
+    """Runs covering `from_date` or later, for the given accounts (latest first per account)."""
+    out = []
+    for aid in account_ids:
+        rows = conn.execute(
+            """SELECT r.*, a.nickname, a.acc_no FROM runs r JOIN accounts a ON a.id=r.account_id
+               WHERE r.account_id=? AND r.period_to>=? ORDER BY r.period_to DESC, r.id DESC""",
+            (aid, from_date.isoformat())).fetchall()
+        out += [dict(r) for r in rows]
+    return out
+
+
+def revoke_from(conn, account_ids: list[int], from_date: date, reason: str, user: str) -> list[dict]:
+    """Admin: remove the reconciliation of `from_date` and every later day for these accounts.
+
+    Later days must go too, because each day continues from the one before it. A copy of every removed run
+    (BRS, flags, checks, matches and items) is kept in `revoked_runs`.
+    """
+    if len(reason.strip()) < MIN_REASON:
+        raise ValueError(f"Give a proper reason (at least {MIN_REASON} characters).")
+    batch = f"{db.now()} {user}"
+    with _RUN_LOCK, db.tx(conn):
+        runs = runs_to_revoke(conn, account_ids, from_date)
+        if not runs:
+            raise ValueError("Nothing to revoke: no reconciliation on or after that date.")
+        for r in runs:
+            snap = {
+                "run": {k: r[k] for k in r if k not in ("nickname", "acc_no")},
+                "matches": [dict(m) for m in conn.execute("SELECT * FROM matches WHERE run_id=?", (r["id"],))],
+                "items": [dict(i) for i in conn.execute("SELECT * FROM items WHERE run_id=?", (r["id"],))],
+            }
+            conn.execute(
+                """INSERT INTO revoked_runs (run_id, account_id, period_from, period_to, created_by, created_at,
+                   revoked_at, revoked_by, reason, batch, snapshot_json) VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+                (r["id"], r["account_id"], r["period_from"], r["period_to"], r["created_by"], r["created_at"],
+                 db.now(), user, reason.strip(), batch, db.dumps(snap)))
+            _delete_run(conn, r["id"])
+            db.audit(conn, user, "revoke_run",
+                     f"Run #{r['id']} · {r['nickname']} · {r['period_from']}..{r['period_to']} · reason: {reason.strip()}")
+        for aid in {r["account_id"] for r in runs}:
+            prev = latest_run(conn, aid)
+            if prev:
+                refresh_run(conn, prev["id"])
+    return runs

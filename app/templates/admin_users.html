@@ -1,0 +1,92 @@
+{% extends "base.html" %}
+{% block title %}Admin · Users · Bank Reco{% endblock %}
+{% block content %}
+{% include "_admin_nav.html" %}
+
+<div class="grid cards" style="grid-template-columns:repeat(auto-fit,minmax(160px,1fr))">
+  <div class="card"><div class="label">Active users</div><div class="value">{{ users | selectattr('active') | list | length }}</div><div class="sub">{{ users|length }} in total</div></div>
+  <div class="card"><div class="label">Active accounts</div><div class="value">{{ stats.accounts }}</div></div>
+  <div class="card"><div class="label">Reconciliations</div><div class="value">{{ stats.runs }}</div></div>
+  <div class="card"><div class="label">Revoked runs</div><div class="value">{{ stats.revoked }}</div></div>
+</div>
+
+<div class="panel tight">
+<table>
+  <thead><tr><th>User</th><th>Role</th><th>Status</th><th>Last sign-in</th><th>Edit</th><th>Reset password</th></tr></thead>
+  <tbody>
+  {% for u in users %}
+  <tr class="{{ '' if u.active else 'faint' }}">
+    <td><strong>{{ u.full_name or u.username }}</strong><div class="small muted mono">{{ u.username }}{% if u.username == user %} · you{% endif %}</div></td>
+    <td><span class="pill {{ {'admin':'critical','manager':'high','operator':'info','viewer':'neutral'}[u.role] }}">{{ u.role_label }}</span></td>
+    <td class="small">{% if not u.active %}<span class="pill neutral">Disabled</span>{% elif u.must_change_pw %}<span class="pill review">Must set password</span>{% else %}<span class="pill ok">Active</span>{% endif %}</td>
+    <td class="small muted nowrap">{{ u.last_login or '—' }}</td>
+    <td>
+      <form method="post" action="{{ base }}/admin/users/{{ u.id }}" style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">
+        <input type="hidden" name="csrf_token" value="{{ csrf }}">
+        <input type="text" name="full_name" value="{{ u.full_name }}" placeholder="Full name" style="width:150px;flex:none;padding:4px 7px;font-size:12.5px">
+        <select name="role" style="width:auto;padding:4px 6px;font-size:12.5px" {{ 'disabled' if u.username == user }}>
+          {% for r in roles_list %}<option value="{{ r }}" {{ 'selected' if r == u.role }}>{{ role_labels[r] }}</option>{% endfor %}
+        </select>
+        {% if u.username == user %}<input type="hidden" name="role" value="{{ u.role }}">{% endif %}
+        <select name="active" style="width:auto;padding:4px 6px;font-size:12.5px" {{ 'disabled' if u.username == user }}>
+          <option value="1" {{ 'selected' if u.active }}>Enabled</option><option value="0" {{ 'selected' if not u.active }}>Disabled</option>
+        </select>
+        {% if u.username == user %}<input type="hidden" name="active" value="1">{% endif %}
+        <button class="btn small">Save</button>
+      </form>
+    </td>
+    <td>
+      {% if u.username != user %}
+      <details><summary class="small faint">Set temporary password</summary>
+        <form method="post" action="{{ base }}/admin/users/{{ u.id }}/reset" style="margin-top:6px;display:flex;gap:6px;flex-wrap:wrap">
+          <input type="hidden" name="csrf_token" value="{{ csrf }}">
+          <input type="text" name="password" minlength="10" required placeholder="10+ characters" class="genpw mono" style="width:170px;padding:4px 7px;font-size:12.5px" autocomplete="off">
+          <button type="button" class="btn small" data-gen>Generate</button>
+          <button class="btn small danger">Reset</button>
+        </form>
+      </details>
+      {% else %}<a class="small" href="{{ base }}/me">My account</a>{% endif %}
+    </td>
+  </tr>
+  {% endfor %}
+  </tbody>
+</table>
+</div>
+
+<div class="grid two">
+  <form class="panel" method="post" action="{{ base }}/admin/users" autocomplete="off">
+    <input type="hidden" name="csrf_token" value="{{ csrf }}">
+    <h2>Add a user</h2>
+    <div class="formgrid">
+      <div class="field"><label>Full name</label><input type="text" name="full_name" placeholder="e.g. Anjali Menon"></div>
+      <div class="field"><label>Username</label><input type="text" name="username" required pattern="[a-z0-9][a-z0-9._\-]{2,31}" placeholder="e.g. anjali" autocapitalize="off">
+        <div class="hint">Lowercase letters, digits, dot, dash, underscore.</div></div>
+      <div class="field"><label>Role</label>
+        <select name="role" required>{% for r in roles_list %}<option value="{{ r }}" {{ 'selected' if r == 'operator' }}>{{ role_labels[r] }}</option>{% endfor %}</select></div>
+      <div class="field"><label>Temporary password</label>
+        <div style="display:flex;gap:6px"><input type="text" name="password" minlength="10" required class="genpw mono" autocomplete="off"><button type="button" class="btn" data-gen>Generate</button></div>
+        <div class="hint">Give this to the person. They must set their own password at first sign-in.</div></div>
+    </div>
+    <button class="btn primary">Create user</button>
+  </form>
+
+  <div class="panel">
+    <h2>What each role can do</h2>
+    {% for r in roles_list %}
+    <p style="margin:0 0 10px"><span class="pill {{ {'admin':'critical','manager':'high','operator':'info','viewer':'neutral'}[r] }}">{{ role_labels[r] }}</span>
+      <span class="small">{{ role_desc[r] }}</span></p>
+    {% endfor %}
+    <p class="small muted" style="margin:0">A Manager can't sign off a run they reconciled themselves. Changing someone's role or disabling them signs them out immediately. At least one active Admin must always remain.</p>
+  </div>
+</div>
+
+<script>
+document.querySelectorAll("[data-gen]").forEach(function (b) {
+  b.addEventListener("click", function () {
+    var abc = "abcdefghjkmnpqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789", a = new Uint32Array(12), s = "";
+    crypto.getRandomValues(a); a.forEach(function (x) { s += abc[x % abc.length]; });
+    var f = b.closest("form").querySelector(".genpw"); f.value = s.slice(0, 4) + "-" + s.slice(4, 8) + "-" + s.slice(8); f.select();
+  });
+});
+</script>
+{% endblock %}

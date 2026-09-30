@@ -168,8 +168,10 @@ def build_report(conn, run_id: int) -> tuple[bytes, str]:
     ws["A28"], ws["A28"].font = f"Prepared by system for {run['created_by']} on {run['created_at']}", FS
     if run["ack_reason"]:
         ws["A29"], ws["A29"].font = f"Warnings acknowledged: {run['ack_reason']}", FS
-    ws["A31"], ws["A31"].font = "Prepared by: ____________________", F
-    ws["A33"], ws["A33"].font = "Checked by: ____________________", F
+    ws["A31"], ws["A31"].font = f"Prepared by: {run['created_by']}  ({run['created_at']})", F
+    chk = run["checked_by"] if "checked_by" in run.keys() else ""
+    ws["A33"], ws["A33"].font = (f"Checked by: {chk}  ({run['checked_at']})" + (f" — {run['checked_note']}" if run["checked_note"] else "")
+                                 if chk else "Checked by: ____________________"), F
     ws["A35"], ws["A35"].font = "Approved by: ____________________", F
 
     # ------------------------------------------------------------------ Summary & checks

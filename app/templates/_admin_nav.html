@@ -1,0 +1,14 @@
+<div class="pagehead">
+  <div>
+    <div class="muted small">kavitha.cloud/bankreco/admin</div>
+    <h1>Admin</h1>
+    <div class="muted">Users and roles, and revoking reconciled days. Every action here is recorded in the audit log.</div>
+  </div>
+</div>
+<div class="chips" style="margin-bottom:16px">
+  <a class="chip {{ 'on' if tab == 'users' }}" href="{{ base }}/admin" style="text-decoration:none">Users &amp; roles</a>
+  <a class="chip {{ 'on' if tab == 'revoke' }}" href="{{ base }}/admin/revoke" style="text-decoration:none">Revoke a day</a>
+  <a class="chip" href="{{ base }}/accounts" style="text-decoration:none">Bank accounts</a>
+  <a class="chip" href="{{ base }}/holidays" style="text-decoration:none">Holidays</a>
+  <a class="chip" href="{{ base }}/audit" style="text-decoration:none">Audit log</a>
+</div>

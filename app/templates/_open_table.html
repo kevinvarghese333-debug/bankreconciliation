@@ -5,16 +5,16 @@
 {% else %}
 <div class="toolbar">
   <input type="text" placeholder="Search name, amount, ref…" data-search="#tb-open">
-  {% if is_latest %}<span class="muted small">Tick a bank line and the book entry(ies) it belongs to, then match them manually. Amounts must be equal.</span>{% endif %}
+  {% if is_latest and can('match') %}<span class="muted small">Tick a bank line and the book entry(ies) it belongs to, then match them manually. Amounts must be equal.</span>{% endif %}
 </div>
 <div class="scroll">
 <table id="tb-open">
-  <thead><tr>{% if is_latest %}<th class="noprint"></th>{% endif %}<th>Side</th><th>Type</th><th>Date</th><th class="num">Days</th><th>Name</th><th>Reference</th><th>Details</th><th class="num">Amount</th><th>Note</th></tr></thead>
+  <thead><tr>{% if is_latest and can('match') %}<th class="noprint"></th>{% endif %}<th>Side</th><th>Type</th><th>Date</th><th class="num">Days</th><th>Name</th><th>Reference</th><th>Details</th><th class="num">Amount</th><th>Note</th></tr></thead>
   <tbody>
   {% for it in open_items %}
   {% set age = (as_of - it.date).days %}
   <tr>
-    {% if is_latest %}<td class="noprint"><input type="checkbox" class="pick" value="{{ it.id }}" data-side="{{ it.side }}" data-dir="{{ it.dir }}" data-amt="{{ it.amount }}"></td>{% endif %}
+    {% if is_latest and can('match') %}<td class="noprint"><input type="checkbox" class="pick" value="{{ it.id }}" data-side="{{ it.side }}" data-dir="{{ it.dir }}" data-amt="{{ it.amount }}"></td>{% endif %}
     <td class="side">{{ it.side }}</td>
     <td class="small nowrap">
       {% if it.side == 'book' and it.dir == 'out' %}<span class="pill high">Paid in book, not in bank</span>
@@ -29,17 +29,17 @@
     <td class="small muted" style="max-width:340px">{{ detail(it) }}</td>
     <td class="num">{{ it.amount | inr }}</td>
     <td class="small" style="min-width:160px">
-      <form method="post" action="{{ base }}/items/{{ it.id }}/note" class="notef">
+      {% if can('note') %}<form method="post" action="{{ base }}/items/{{ it.id }}/note" class="notef">
         <input type="hidden" name="csrf_token" value="{{ csrf }}"><input type="hidden" name="back" value="{{ back }}">
         <input type="text" name="note" value="{{ it.note or '' }}" placeholder="Add note…" style="padding:4px 7px;font-size:12.5px">
-      </form>
+      </form>{% else %}{{ it.note or '' }}{% endif %}
     </td>
   </tr>
   {% endfor %}
   </tbody>
 </table>
 </div>
-{% if is_latest %}
+{% if is_latest and can('match') %}
 <form class="selbar noprint" id="selbar" method="post" action="{{ base }}/manual-match">
   <input type="hidden" name="csrf_token" value="{{ csrf }}">
   <input type="hidden" name="account_id" value="{{ account.id }}">

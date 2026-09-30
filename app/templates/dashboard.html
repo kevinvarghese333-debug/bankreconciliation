@@ -7,7 +7,7 @@
 {% set crit = done | sum(attribute="summary.severity.critical") if done else 0 %}
 <div class="pagehead">
   <div><h1>Dashboard</h1><div class="muted">{{ now().strftime("%A, %d %B %Y") }}</div></div>
-  <div class="actions"><a class="btn primary" href="{{ base }}/reconcile">+ New reconciliation</a></div>
+  {% if can('reconcile') %}<div class="actions"><a class="btn primary" href="{{ base }}/reconcile">+ New reconciliation</a></div>{% endif %}
 </div>
 
 {% if not accounts %}

@@ -16,7 +16,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from starlette.middleware.sessions import SessionMiddleware
 
-from . import accounts_import, auth, db, engine, report
+from . import accounts_import, auth, db, engine, report, roles
 from .parsers import inr
 
 BASE = Path(__file__).resolve().parent
@@ -97,8 +97,11 @@ def check_csrf(request: Request, token: str) -> bool:
 
 
 def render(request: Request, name: str, **ctx):
+    role = getattr(request.state, "role", None)
     ctx.update(request=request, user=user(request), csrf=csrf(request),
-               flash=request.session.pop("flash", None))
+               flash=request.session.pop("flash", None), role=role,
+               role_label=roles.LABELS.get(role, ""), full_name=getattr(request.state, "full_name", ""),
+               can=lambda perm: roles.can(role, perm))
     return templates.TemplateResponse(request, name, ctx)
 
 
@@ -110,25 +113,32 @@ def redirect(url: str, flash: tuple[str, str] | None = None, request: Request | 
     return RedirectResponse(url, status_code=303)
 
 
-def guard(request: Request):
-    """Returns a redirect if not logged in, else None."""
+def guard(request: Request, perm: str = "view"):
+    """Returns a redirect if not logged in, disabled, or the role lacks `perm`; else None.
+
+    `perm` "self" only needs a valid login (used for the change-password page)."""
     c = conn()
     try:
         if auth.user_count(c) == 0:
             return RedirectResponse(ROOT_PATH + "/setup", status_code=303)
+        row = c.execute("SELECT * FROM users WHERE username=?", (user(request) or "",)).fetchone()
     finally:
         c.close()
     if not user(request):
         return RedirectResponse(ROOT_PATH + "/login", status_code=303)
-    c = conn()
-    try:
-        row = c.execute("SELECT session_nonce FROM users WHERE username=?", (user(request),)).fetchone()
-    finally:
-        c.close()
-    if not row or not row["session_nonce"] or not secrets.compare_digest(row["session_nonce"],
-                                                                          request.session.get("nonce", "")):
+    if (not row or not row["active"] or not row["session_nonce"]
+            or not secrets.compare_digest(row["session_nonce"], request.session.get("nonce", ""))):
         request.session.clear()
         return RedirectResponse(ROOT_PATH + "/login", status_code=303)
+    request.state.role = row["role"]
+    request.state.full_name = row["full_name"] or row["username"]
+    if perm == "self":
+        return None
+    if row["must_change_pw"]:
+        return redirect("/me", ("error", "Set your own password before continuing."), request)
+    if not roles.can(row["role"], perm):
+        return redirect("/", ("error", f"Your role ({roles.LABELS.get(row['role'], row['role'])}) cannot "
+                                       f"{roles.ACTION_TEXT.get(perm, perm)}. Ask an Admin."), request)
     return None
 
 
@@ -182,9 +192,9 @@ def setup(request: Request, username: str = Form(...), password: str = Form(...)
             return redirect("/setup", ("error", "Use at least 10 characters for the password."), request)
         if password != password2:
             return redirect("/setup", ("error", "Passwords do not match."), request)
-        c.execute("INSERT INTO users(username, pw_hash, created_at) VALUES (?,?,?)",
-                  (username.strip(), auth.hash_pw(password), db.now()))
-        db.audit(c, username.strip(), "setup", "Login created")
+        c.execute("INSERT INTO users(username, pw_hash, created_at, role, full_name) VALUES (?,?,?,?,?)",
+                  (username.strip(), auth.hash_pw(password), db.now(), "admin", username.strip()))
+        db.audit(c, username.strip(), "setup", "Admin login created")
         _start_session(request, c, username.strip())
     finally:
         c.close()
@@ -217,11 +227,17 @@ def login(request: Request, username: str = Form(...), password: str = Form(...)
             auth.record_fail(ip)
             db.audit(c, username.strip() or "?", "login_failed", f"from {ip}")
             return redirect("/login", ("error", "Wrong username or password."), request)
+        if not row["active"]:
+            db.audit(c, row["username"], "login_blocked", f"disabled user, from {ip}")
+            return redirect("/login", ("error", "This user is disabled. Contact your Admin."), request)
         auth.clear_fails(ip)
         db.audit(c, row["username"], "login", f"from {ip}")
+        c.execute("UPDATE users SET last_login=? WHERE id=?", (db.now(), row["id"]))
         _start_session(request, c, row["username"])
     finally:
         c.close()
+    if row["must_change_pw"]:
+        return redirect("/me", ("ok", "Welcome. Please set your own password to continue."), request)
     return RedirectResponse(ROOT_PATH + "/", status_code=303)
 
 
@@ -238,26 +254,43 @@ def logout(request: Request, csrf_token: str = Form("")):
     return RedirectResponse(ROOT_PATH + "/login", status_code=303)
 
 
+@app.get("/me", response_class=HTMLResponse)
+def me_page(request: Request):
+    if (g := guard(request, "self")):
+        return g
+    c = conn()
+    try:
+        me = dict(c.execute("SELECT username, full_name, role, must_change_pw, last_login, created_at FROM users "
+                            "WHERE username=?", (user(request),)).fetchone())
+    finally:
+        c.close()
+    me["role_label"] = roles.LABELS.get(me["role"], me["role"])
+    me["role_desc"] = roles.DESCRIPTIONS.get(me["role"], "")
+    return render(request, "me.html", me=me)
+
+
 @app.post("/password")
 def change_password(request: Request, current: str = Form(...), new: str = Form(...), new2: str = Form(...),
                     csrf_token: str = Form("")):
-    if (g := guard(request)):
+    if (g := guard(request, "self")):
         return g
     if not check_csrf(request, csrf_token):
-        return redirect("/accounts", ("error", "Session expired, try again."), request)
+        return redirect("/me", ("error", "Session expired, try again."), request)
     c = conn()
     try:
         row = c.execute("SELECT * FROM users WHERE username=?", (user(request),)).fetchone()
         if not auth.verify_pw(current, row["pw_hash"]):
-            return redirect("/accounts", ("error", "Current password is wrong."), request)
+            return redirect("/me", ("error", "Current password is wrong."), request)
         if len(new) < 10 or new != new2:
-            return redirect("/accounts", ("error", "New password must be 10+ characters and match."), request)
-        c.execute("UPDATE users SET pw_hash=? WHERE id=?", (auth.hash_pw(new), row["id"]))
+            return redirect("/me", ("error", "New password must be 10+ characters and match."), request)
+        if new == current:
+            return redirect("/me", ("error", "Choose a password different from the current one."), request)
+        c.execute("UPDATE users SET pw_hash=?, must_change_pw=0 WHERE id=?", (auth.hash_pw(new), row["id"]))
         db.audit(c, user(request), "password_changed")
         _start_session(request, c, row["username"])   # signs out every other session
     finally:
         c.close()
-    return redirect("/accounts", ("ok", "Password changed."), request)
+    return redirect("/", ("ok", "Password changed."), request)
 
 
 # ---------------------------------------------------------------------------- dashboard
@@ -335,7 +368,7 @@ def accounts_template(request: Request):
 @app.post("/accounts/import")
 def accounts_bulk_import(request: Request, file: UploadFile = File(...), default_kind: str = Form("collection"),
                          main_last4: str = Form(""), csrf_token: str = Form("")):
-    if (g := guard(request)):
+    if (g := guard(request, "accounts")):
         return g
     if not check_csrf(request, csrf_token):
         return redirect("/accounts", ("error", "Session expired, try again."), request)
@@ -372,7 +405,7 @@ def accounts_bulk_import(request: Request, file: UploadFile = File(...), default
 def save_account(request: Request, bank: str = Form(...), acc_no: str = Form(...), nickname: str = Form(...),
                  kind: str = Form(...), branch: str = Form(""), notes: str = Form(""), active: str = Form("1"),
                  account_id: str = Form(""), csrf_token: str = Form("")):
-    if (g := guard(request)):
+    if (g := guard(request, "accounts")):
         return g
     if not check_csrf(request, csrf_token):
         return redirect("/accounts", ("error", "Session expired, try again."), request)
@@ -432,7 +465,7 @@ def _cleanup_staging():
 
 @app.get("/reconcile", response_class=HTMLResponse)
 def reconcile_form(request: Request):
-    if (g := guard(request)):
+    if (g := guard(request, "reconcile")):
         return g
     c = conn()
     try:
@@ -472,7 +505,7 @@ def _finish_upload(request, token, meta, acknowledged=False, reason=""):
 @app.post("/reconcile")
 def reconcile(request: Request, account_id: int = Form(...), bank_file: UploadFile = File(...),
               book_file: UploadFile = File(...), csrf_token: str = Form("")):
-    if (g := guard(request)):
+    if (g := guard(request, "reconcile")):
         return g
     if not check_csrf(request, csrf_token):
         return redirect("/reconcile", ("error", "Session expired, try again."), request)
@@ -494,7 +527,7 @@ def reconcile(request: Request, account_id: int = Form(...), bank_file: UploadFi
 
 @app.post("/reconcile/ack")
 def reconcile_ack(request: Request, token: str = Form(...), reason: str = Form(""), csrf_token: str = Form("")):
-    if (g := guard(request)):
+    if (g := guard(request, "reconcile")):
         return g
     if not check_csrf(request, csrf_token) or not token.isalnum():
         return redirect("/reconcile", ("error", "Session expired, upload again."), request)
@@ -504,12 +537,14 @@ def reconcile_ack(request: Request, token: str = Form(...), reason: str = Form("
     meta = json.loads(mp.read_text())
     if meta.get("user") != user(request):
         return redirect("/reconcile", ("error", "Upload belongs to another session."), request)
+    if not roles.can(request.state.role, "ack"):
+        return redirect("/reconcile", ("error", "Only a Manager or Admin can acknowledge warnings."), request)
     return _finish_upload(request, token, meta, True, reason)
 
 
 @app.post("/reconcile/cancel")
 def reconcile_cancel(request: Request, token: str = Form(...), csrf_token: str = Form("")):
-    if (g := guard(request)):
+    if (g := guard(request, "reconcile")):
         return g
     if check_csrf(request, csrf_token) and token.isalnum():
         shutil.rmtree(STAGING / token, ignore_errors=True)
@@ -577,9 +612,38 @@ def run_excel(request: Request, run_id: int):
                     headers={"Content-Disposition": f'attachment; filename="{fname}"'})
 
 
+@app.post("/runs/{run_id}/signoff")
+def run_signoff(request: Request, run_id: int, note: str = Form(""), undo: str = Form(""), csrf_token: str = Form("")):
+    if (g := guard(request, "signoff")):
+        return g
+    if not check_csrf(request, csrf_token):
+        return redirect(f"/runs/{run_id}", ("error", "Session expired, try again."), request)
+    c = conn()
+    try:
+        run = c.execute("SELECT * FROM runs WHERE id=?", (run_id,)).fetchone()
+        if not run:
+            return redirect("/history", ("error", "Run not found."), request)
+        if undo:
+            if run["checked_by"] != user(request) and not roles.can(request.state.role, "admin"):
+                return redirect(f"/runs/{run_id}", ("error", "Only the person who signed off, or an Admin, can withdraw it."), request)
+            c.execute("UPDATE runs SET checked_by='', checked_at='', checked_note='' WHERE id=?", (run_id,))
+            db.audit(c, user(request), "signoff_withdrawn", f"Run #{run_id}")
+            return redirect(f"/runs/{run_id}", ("ok", "Sign-off withdrawn."), request)
+        if run["checked_by"]:
+            return redirect(f"/runs/{run_id}", ("error", f"Already signed off by {run['checked_by']}."), request)
+        if run["created_by"] == user(request):
+            return redirect(f"/runs/{run_id}", ("error", "You reconciled this run, so someone else must check it."), request)
+        c.execute("UPDATE runs SET checked_by=?, checked_at=?, checked_note=? WHERE id=?",
+                  (user(request), db.now(), note.strip()[:200], run_id))
+        db.audit(c, user(request), "signoff", f"Run #{run_id} ({run['period_to']})" + (f" · {note.strip()}" if note.strip() else ""))
+    finally:
+        c.close()
+    return redirect(f"/runs/{run_id}", ("ok", "Signed off as checked."), request)
+
+
 @app.post("/runs/{run_id}/undo")
 def run_undo(request: Request, run_id: int, confirm: str = Form(""), csrf_token: str = Form("")):
-    if (g := guard(request)):
+    if (g := guard(request, "undo")):
         return g
     if not check_csrf(request, csrf_token) or confirm.strip().upper() != "UNDO":
         return redirect(f"/runs/{run_id}", ("error", "Type UNDO to confirm."), request)
@@ -597,7 +661,7 @@ def run_undo(request: Request, run_id: int, confirm: str = Form(""), csrf_token:
 @app.post("/matches/{match_id}/unmatch")
 def do_unmatch(request: Request, match_id: int, reason: str = Form(""), back: str = Form("/"),
                csrf_token: str = Form("")):
-    if (g := guard(request)):
+    if (g := guard(request, "unmatch")):
         return g
     back = safe_back(back)
     if not check_csrf(request, csrf_token):
@@ -615,7 +679,7 @@ def do_unmatch(request: Request, match_id: int, reason: str = Form(""), back: st
 @app.post("/manual-match")
 def do_manual_match(request: Request, account_id: int = Form(...), item_ids: str = Form(""),
                     remark: str = Form(""), back: str = Form("/"), csrf_token: str = Form("")):
-    if (g := guard(request)):
+    if (g := guard(request, "match")):
         return g
     back = safe_back(back)
     if not check_csrf(request, csrf_token):
@@ -634,7 +698,7 @@ def do_manual_match(request: Request, account_id: int = Form(...), item_ids: str
 @app.post("/items/{item_id}/note")
 def item_note(request: Request, item_id: int, note: str = Form(""), back: str = Form("/"),
               csrf_token: str = Form("")):
-    if (g := guard(request)):
+    if (g := guard(request, "note")):
         return g
     back = safe_back(back)
     if not check_csrf(request, csrf_token):
@@ -734,7 +798,7 @@ def holidays_page(request: Request):
 
 @app.post("/holidays")
 def holidays_add(request: Request, lines: str = Form(""), csrf_token: str = Form("")):
-    if (g := guard(request)):
+    if (g := guard(request, "holidays")):
         return g
     if not check_csrf(request, csrf_token):
         return redirect("/holidays", ("error", "Session expired, try again."), request)
@@ -761,7 +825,7 @@ def holidays_add(request: Request, lines: str = Form(""), csrf_token: str = Form
 
 @app.post("/holidays/delete")
 def holidays_delete(request: Request, day: str = Form(...), csrf_token: str = Form("")):
-    if (g := guard(request)):
+    if (g := guard(request, "holidays")):
         return g
     if not check_csrf(request, csrf_token):
         return redirect("/holidays", ("error", "Session expired, try again."), request)
@@ -778,9 +842,194 @@ def holidays_delete(request: Request, day: str = Form(...), csrf_token: str = Fo
     return redirect("/holidays", ("ok", "Holiday removed."), request)
 
 
+# ---------------------------------------------------------------------------- admin portal (/admin)
+
+USERNAME_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{2,31}$")
+
+
+def _active_admins(c, exclude_id: int | None = None) -> int:
+    q = "SELECT COUNT(*) FROM users WHERE role='admin' AND active=1"
+    args = []
+    if exclude_id is not None:
+        q += " AND id<>?"
+        args.append(exclude_id)
+    return c.execute(q, args).fetchone()[0]
+
+
+@app.get("/admin", response_class=HTMLResponse)
+def admin_home(request: Request):
+    if (g := guard(request, "admin")):
+        return g
+    c = conn()
+    try:
+        users = [dict(u) for u in c.execute(
+            "SELECT id, username, full_name, role, active, must_change_pw, last_login, created_at FROM users "
+            "ORDER BY active DESC, CASE role WHEN 'admin' THEN 0 WHEN 'manager' THEN 1 WHEN 'operator' THEN 2 ELSE 3 END, username")]
+        stats = {
+            "accounts": c.execute("SELECT COUNT(*) FROM accounts WHERE active=1").fetchone()[0],
+            "runs": c.execute("SELECT COUNT(*) FROM runs").fetchone()[0],
+            "revoked": c.execute("SELECT COUNT(*) FROM revoked_runs").fetchone()[0],
+        }
+    finally:
+        c.close()
+    for u in users:
+        u["role_label"] = roles.LABELS.get(u["role"], u["role"])
+    return render(request, "admin_users.html", users=users, stats=stats, roles_list=roles.ROLES[::-1],
+                  role_labels=roles.LABELS, role_desc=roles.DESCRIPTIONS, tab="users")
+
+
+@app.post("/admin/users")
+def admin_user_create(request: Request, username: str = Form(...), full_name: str = Form(""), role: str = Form(...),
+                      password: str = Form(...), csrf_token: str = Form("")):
+    if (g := guard(request, "admin")):
+        return g
+    if not check_csrf(request, csrf_token):
+        return redirect("/admin", ("error", "Session expired, try again."), request)
+    username = username.strip().lower()
+    if not USERNAME_RE.match(username):
+        return redirect("/admin", ("error", "Username: 3–32 characters, lowercase letters, digits, dot, dash or underscore."), request)
+    if role not in roles.ROLES:
+        return redirect("/admin", ("error", "Pick a role."), request)
+    if len(password) < 10:
+        return redirect("/admin", ("error", "Temporary password must be at least 10 characters."), request)
+    c = conn()
+    try:
+        if c.execute("SELECT 1 FROM users WHERE username=?", (username,)).fetchone():
+            return redirect("/admin", ("error", f"User '{username}' already exists."), request)
+        c.execute("INSERT INTO users(username, pw_hash, created_at, role, full_name, active, must_change_pw) "
+                  "VALUES (?,?,?,?,?,1,1)", (username, auth.hash_pw(password), db.now(), role, full_name.strip()[:80]))
+        db.audit(c, user(request), "user_created", f"{username} ({roles.LABELS[role]}) {full_name.strip()}")
+    finally:
+        c.close()
+    return redirect("/admin", ("ok", f"User '{username}' created as {roles.LABELS[role]}. Give them the temporary "
+                                     "password; they must set their own at first sign-in."), request)
+
+
+@app.post("/admin/users/{uid}")
+def admin_user_update(request: Request, uid: int, full_name: str = Form(""), role: str = Form(...),
+                      active: str = Form("1"), csrf_token: str = Form("")):
+    if (g := guard(request, "admin")):
+        return g
+    if not check_csrf(request, csrf_token):
+        return redirect("/admin", ("error", "Session expired, try again."), request)
+    if role not in roles.ROLES:
+        return redirect("/admin", ("error", "Unknown role."), request)
+    c = conn()
+    try:
+        u = c.execute("SELECT * FROM users WHERE id=?", (uid,)).fetchone()
+        if not u:
+            return redirect("/admin", ("error", "User not found."), request)
+        act = 1 if active == "1" else 0
+        if u["username"] == user(request) and (role != u["role"] or not act):
+            return redirect("/admin", ("error", "You cannot change your own role or disable yourself. "
+                                                "Ask another Admin."), request)
+        if u["role"] == "admin" and (role != "admin" or not act) and _active_admins(c, exclude_id=uid) == 0:
+            return redirect("/admin", ("error", "At least one active Admin must remain."), request)
+        changes = []
+        if role != u["role"]:
+            changes.append(f"role {roles.LABELS.get(u['role'])} → {roles.LABELS[role]}")
+        if act != u["active"]:
+            changes.append("enabled" if act else "disabled")
+        if full_name.strip() != (u["full_name"] or ""):
+            changes.append(f"name '{full_name.strip()}'")
+        nonce = u["session_nonce"] if act and role == u["role"] else secrets.token_urlsafe(24)   # sign out on change
+        c.execute("UPDATE users SET full_name=?, role=?, active=?, session_nonce=? WHERE id=?",
+                  (full_name.strip()[:80], role, act, nonce, uid))
+        if changes:
+            db.audit(c, user(request), "user_updated", f"{u['username']}: " + ", ".join(changes))
+    finally:
+        c.close()
+    return redirect("/admin", ("ok", f"Saved {u['username']}." + (" They have been signed out." if nonce != u["session_nonce"] else "")), request)
+
+
+@app.post("/admin/users/{uid}/reset")
+def admin_user_reset(request: Request, uid: int, password: str = Form(...), csrf_token: str = Form("")):
+    if (g := guard(request, "admin")):
+        return g
+    if not check_csrf(request, csrf_token):
+        return redirect("/admin", ("error", "Session expired, try again."), request)
+    if len(password) < 10:
+        return redirect("/admin", ("error", "Temporary password must be at least 10 characters."), request)
+    c = conn()
+    try:
+        u = c.execute("SELECT * FROM users WHERE id=?", (uid,)).fetchone()
+        if not u:
+            return redirect("/admin", ("error", "User not found."), request)
+        if u["username"] == user(request):
+            return redirect("/admin", ("error", "Change your own password from My account."), request)
+        c.execute("UPDATE users SET pw_hash=?, must_change_pw=1, session_nonce=? WHERE id=?",
+                  (auth.hash_pw(password), secrets.token_urlsafe(24), uid))
+        db.audit(c, user(request), "user_password_reset", u["username"])
+    finally:
+        c.close()
+    return redirect("/admin", ("ok", f"Temporary password set for {u['username']}. They were signed out and must "
+                                     "choose a new password at next sign-in."), request)
+
+
+def _revoke_accounts(c, account: str) -> list[int]:
+    if account == "all":
+        return [r["id"] for r in c.execute("SELECT id FROM accounts ORDER BY id")]
+    return [int(account)] if account.isdigit() else []
+
+
+@app.get("/admin/revoke", response_class=HTMLResponse)
+def admin_revoke_page(request: Request):
+    if (g := guard(request, "admin")):
+        return g
+    account = request.query_params.get("account", "")
+    from_s = request.query_params.get("from", "")
+    c = conn()
+    try:
+        accounts = [dict(a) for a in c.execute("SELECT * FROM accounts ORDER BY kind DESC, nickname")]
+        for a in accounts:
+            lr = engine.latest_run(c, a["id"])
+            a["last_period"] = lr["period_to"] if lr else None
+        preview, from_d = None, None
+        if account and from_s:
+            try:
+                from_d = date.fromisoformat(from_s)
+            except ValueError:
+                from_d = None
+            if from_d:
+                preview = engine.runs_to_revoke(c, _revoke_accounts(c, account), from_d)
+        revoked = [dict(r) for r in c.execute(
+            """SELECT v.id, v.run_id, v.period_from, v.period_to, v.created_by, v.revoked_at, v.revoked_by, v.reason,
+                      a.nickname FROM revoked_runs v LEFT JOIN accounts a ON a.id=v.account_id
+               ORDER BY v.id DESC LIMIT 300""")]
+    finally:
+        c.close()
+    return render(request, "admin_revoke.html", accounts=accounts, account=account, from_s=from_s, from_d=from_d,
+                  preview=preview, revoked=revoked, tab="revoke")
+
+
+@app.post("/admin/revoke")
+def admin_revoke(request: Request, account: str = Form(...), from_date: str = Form(...), reason: str = Form(""),
+                 confirm: str = Form(""), csrf_token: str = Form("")):
+    if (g := guard(request, "admin")):
+        return g
+    back = f"/admin/revoke?account={account}&from={from_date}"
+    if not check_csrf(request, csrf_token):
+        return redirect(back, ("error", "Session expired, try again."), request)
+    if confirm.strip().upper() != "REVOKE":
+        return redirect(back, ("error", "Type REVOKE to confirm."), request)
+    try:
+        d = date.fromisoformat(from_date)
+    except ValueError:
+        return redirect("/admin/revoke", ("error", "Pick a valid date."), request)
+    c = conn()
+    try:
+        runs = engine.revoke_from(c, _revoke_accounts(c, account), d, reason, user(request))
+    except ValueError as e:
+        return redirect(back, ("error", str(e)), request)
+    finally:
+        c.close()
+    return redirect("/admin/revoke", ("ok", f"Revoked {len(runs)} reconciliation(s) from {d:%d-%m-%Y}. Those days can "
+                                            "now be reconciled again, in order."), request)
+
+
 @app.get("/audit", response_class=HTMLResponse)
 def audit_page(request: Request):
-    if (g := guard(request)):
+    if (g := guard(request, "audit")):
         return g
     c = conn()
     try:

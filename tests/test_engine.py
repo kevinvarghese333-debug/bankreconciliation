@@ -513,3 +513,110 @@ def test_holidays_page(conn):
     c.post("/holidays/delete", data={"day": "2026-12-25", "csrf_token": tok})
     assert "<td>Christmas</td>" not in c.get("/holidays").text
     assert TestClient(app, follow_redirects=False).get("/holidays").status_code == 303
+
+
+def _client_setup():
+    import re
+    from fastapi.testclient import TestClient
+    from app.main import app
+    c = TestClient(app, follow_redirects=False)
+    tok = re.search(r'name="csrf_token" value="([^"]+)"', c.get("/setup").text).group(1)
+    c.post("/setup", data={"username": "kev", "password": "abcdefghijk1", "password2": "abcdefghijk1", "csrf_token": tok})
+    return c
+
+
+def _tok(client, path="/"):
+    import re
+    r = client.get(path, follow_redirects=True)
+    return re.search(r'name="csrf_token" value="([^"]+)"', r.text).group(1)
+
+
+def _login(username, password):
+    from fastapi.testclient import TestClient
+    from app.main import app
+    c = TestClient(app, follow_redirects=False)
+    tok = _tok(c, "/login")
+    r = c.post("/login", data={"username": username, "password": password, "csrf_token": tok})
+    return c, r
+
+
+def test_users_and_roles(conn):
+    admin = _client_setup()
+    t = _tok(admin, "/admin")
+    for u, role in (("anjali", "operator"), ("vinod", "viewer"), ("meera", "manager")):
+        r = admin.post("/admin/users", data={"username": u, "full_name": u.title(), "role": role,
+                                             "password": "Temp-pass-123", "csrf_token": t})
+        assert r.status_code == 303
+    assert "Anjali" in admin.get("/admin").text
+    # first sign-in forces a password change
+    op, r = _login("anjali", "Temp-pass-123")
+    assert r.headers["location"].endswith("/me")
+    assert op.get("/reconcile").headers["location"].endswith("/me")
+    t2 = _tok(op, "/me")
+    op.post("/password", data={"current": "Temp-pass-123", "new": "anjali-own-pw1", "new2": "anjali-own-pw1", "csrf_token": t2})
+    assert op.get("/reconcile").status_code == 200                       # operator may reconcile
+    assert op.get("/admin").status_code == 303                           # ...but not the admin portal
+    t2 = _tok(op, "/")
+    op.post("/holidays", data={"lines": "25-12-2026 Christmas", "csrf_token": t2})
+    assert conn.execute("SELECT COUNT(*) FROM holidays").fetchone()[0] == 0
+    assert op.get("/audit").status_code == 303
+    # viewer: read-only
+    vw, _ = _login("vinod", "Temp-pass-123")
+    t3 = _tok(vw, "/me")
+    vw.post("/password", data={"current": "Temp-pass-123", "new": "vinod-own-pw12", "new2": "vinod-own-pw12", "csrf_token": t3})
+    assert vw.get("/").status_code == 200 and vw.get("/reconcile").status_code == 303
+    assert "New reconciliation" not in vw.get("/").text
+    # disabling a user signs them out at once
+    uid = conn.execute("SELECT id FROM users WHERE username='anjali'").fetchone()[0]
+    admin.post(f"/admin/users/{uid}", data={"full_name": "Anjali", "role": "operator", "active": "0", "csrf_token": t})
+    assert op.get("/").headers["location"].endswith("/login")
+    _, r = _login("anjali", "anjali-own-pw1")
+    assert r.headers["location"].endswith("/login")
+    # the only admin cannot demote or disable themselves
+    kid = conn.execute("SELECT id FROM users WHERE username='kev'").fetchone()[0]
+    admin.post(f"/admin/users/{kid}", data={"full_name": "Kev", "role": "viewer", "active": "0", "csrf_token": t})
+    assert conn.execute("SELECT role, active FROM users WHERE id=?", (kid,)).fetchone()[:] == ("admin", 1)
+    # password reset forces a new password and signs out
+    vid = conn.execute("SELECT id FROM users WHERE username='vinod'").fetchone()[0]
+    admin.post(f"/admin/users/{vid}/reset", data={"password": "Another-temp-1", "csrf_token": t})
+    assert vw.get("/").status_code == 303
+    assert conn.execute("SELECT must_change_pw FROM users WHERE id=?", (vid,)).fetchone()[0] == 1
+
+
+def test_revoke_day_and_rerun(conn, tmp_path):
+    d1, d2, d3 = date(2026, 9, 28), date(2026, 9, 29), date(2026, 9, 30)
+    r1, bc1, kc1 = _day(conn, tmp_path, 1, d1, 100000, [_upi("626900001111", "ASHA", 100)],
+                        [dict(vno=1, name="ASHA", loan_ac="1", instr="1111", receipt=100)])
+    r2, bc2, kc2 = _day(conn, tmp_path, 2, d2, bc1, [_upi("626900002222", "BINU", 200)],
+                        [dict(vno=2, name="BINU", loan_ac="2", instr="2222", receipt=200)])
+    r3, _, _ = _day(conn, tmp_path, 3, d3, bc2, [_upi("626900003333", "CIJI", 300)],
+                    [dict(vno=3, name="CIJI", loan_ac="3", instr="3333", receipt=300)])
+    admin = _client_setup()
+    assert "#" + str(r3) in admin.get(f"/admin/revoke?account=1&from={d2.isoformat()}").text
+    t = _tok(admin, "/admin/revoke")
+    r = admin.post("/admin/revoke", data={"account": "1", "from_date": d2.isoformat(), "reason": "short",
+                                          "confirm": "REVOKE", "csrf_token": t})
+    assert conn.execute("SELECT COUNT(*) FROM runs").fetchone()[0] == 3                 # reason too short
+    admin.post("/admin/revoke", data={"account": "1", "from_date": d2.isoformat(),
+                                      "reason": "Wrong bank book uploaded for 29-09", "confirm": "REVOKE", "csrf_token": t})
+    assert [r[0] for r in conn.execute("SELECT id FROM runs ORDER BY id")] == [r1]
+    arch = conn.execute("SELECT run_id, snapshot_json FROM revoked_runs ORDER BY id").fetchall()
+    assert [a[0] for a in arch] == [r3, r2] and '"items"' in arch[0][1]
+    assert "Wrong bank book" in admin.get("/admin/revoke").text
+    # the same files can be reconciled again
+    rr = run(conn, 1, tmp_path / "b2.xlsx", tmp_path / "k2.xlsx")
+    assert brs(conn, rr)["tallies"]
+
+
+def test_signoff_maker_checker(conn, tmp_path):
+    rid, _, _ = _day(conn, tmp_path, 1, date(2026, 9, 28), 100000, [_upi("626900001111", "ASHA", 100)],
+                     [dict(vno=1, name="ASHA", loan_ac="1", instr="1111", receipt=100)])
+    admin = _client_setup()                      # "kev" — the run was made by "test", so kev may check it
+    t = _tok(admin, f"/runs/{rid}")
+    assert "Sign off as checked" in admin.get(f"/runs/{rid}").text
+    admin.post(f"/runs/{rid}/signoff", data={"note": "Reviewed exceptions", "csrf_token": t})
+    row = conn.execute("SELECT checked_by, checked_note FROM runs WHERE id=?", (rid,)).fetchone()
+    assert row[0] == "kev" and row[1] == "Reviewed exceptions"
+    conn.execute("UPDATE runs SET checked_by='', created_by='kev' WHERE id=?", (rid,))
+    admin.post(f"/runs/{rid}/signoff", data={"csrf_token": t})
+    assert conn.execute("SELECT checked_by FROM runs WHERE id=?", (rid,)).fetchone()[0] == ""   # can't check own run

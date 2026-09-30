@@ -14,7 +14,7 @@
 {% if not runs %}<div class="empty">No runs yet.</div>{% else %}
 <div class="scroll" style="max-height:none">
 <table>
-  <thead><tr><th>Run</th><th>Account</th><th>Period</th><th class="num">Bank closing</th><th class="num">Book closing</th><th>BRS</th><th class="num">Payments</th><th class="num">Collections</th><th class="num">Open after</th><th>Exceptions</th><th>By</th><th></th></tr></thead>
+  <thead><tr><th>Run</th><th>Account</th><th>Period</th><th class="num">Bank closing</th><th class="num">Book closing</th><th>BRS</th><th class="num">Payments</th><th class="num">Collections</th><th class="num">Open after</th><th>Exceptions</th><th>By</th><th>Checked</th><th></th></tr></thead>
   <tbody>
   {% for r in runs %}
   <tr>
@@ -29,6 +29,7 @@
     <td class="num">{{ r.summary.open_items }}</td>
     <td>{% set sv = r.summary.severity %}{% if sv.critical %}<span class="pill critical">{{ sv.critical }}</span> {% endif %}{% if sv.high %}<span class="pill high">{{ sv.high }}</span> {% endif %}{% if sv.medium %}<span class="pill medium">{{ sv.medium }}</span>{% endif %}</td>
     <td class="small muted nowrap">{{ r.created_by }} · {{ r.created_at[:16] }}</td>
+    <td class="small nowrap">{% if r.checked_by %}<span class="pill ok">✔ {{ r.checked_by }}</span>{% else %}<span class="faint">—</span>{% endif %}</td>
     <td class="num nowrap"><a class="btn small" href="{{ base }}/runs/{{ r.id }}">View</a> <a class="btn small" href="{{ base }}/runs/{{ r.id }}/excel">Excel</a></td>
   </tr>
   {% endfor %}

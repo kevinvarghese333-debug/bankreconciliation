@@ -93,6 +93,26 @@ days like any other: upload the bank statement and that day's ERP bank book (dow
   (`Dt.:` in Instrument.Det) matches the date the bank received the money.
 - **Ageing:** "open 3+ days" counts working days only.
 
+## Users, roles and the Admin portal
+
+The first login created at setup is an **Admin**. The Admin portal is at **/bankreco/admin**.
+
+| Role | Can do |
+|---|---|
+| Viewer | Read everything and download Excel |
+| Operator | + upload and reconcile, manual match, notes |
+| Manager | + acknowledge warnings, unmatch, undo the latest run, sign off runs as checked, holidays, audit log |
+| Admin | + users and roles, revoke reconciled days, bank accounts |
+
+- **Users:** create a user with a temporary password; they must set their own at first sign-in. Changing a role,
+  disabling a user or resetting their password signs them out immediately. The last active Admin cannot be
+  demoted or disabled.
+- **Revoke a day:** choose an account (or all accounts) and a date. The app previews every run from that date
+  onward, which will be removed; a reason and typing REVOKE are required. A full copy of each revoked run is
+  kept, and those days can then be reconciled again in order.
+- **Sign-off (maker–checker):** a Manager or Admin marks a run "Checked". They cannot check their own run. The
+  names print on the Excel BRS.
+
 ## 5. How matching works
 
 Amounts must agree to the paisa. Debits only match payments, and credits only match receipts.

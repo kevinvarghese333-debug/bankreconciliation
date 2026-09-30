@@ -1,0 +1,24 @@
+{% extends "base.html" %}
+{% block title %}My account · Bank Reco{% endblock %}
+{% block content %}
+<div class="pagehead"><div><h1>My account</h1>
+  <div class="muted">{{ me.full_name or me.username }} · username <span class="mono">{{ me.username }}</span></div></div></div>
+
+<div class="grid two">
+  <div class="panel">
+    <h2>Your role: {{ me.role_label }}</h2>
+    <p style="margin-top:0">{{ me.role_desc }}</p>
+    <p class="small muted" style="margin-bottom:0">Roles are assigned by an Admin. Last sign-in: {{ me.last_login or '—' }}.</p>
+  </div>
+
+  <form class="panel" method="post" action="{{ base }}/password">
+    <input type="hidden" name="csrf_token" value="{{ csrf }}">
+    <h2>{{ 'Set your own password' if me.must_change_pw else 'Change password' }}</h2>
+    {% if me.must_change_pw %}<p class="small" style="margin-top:0">You signed in with a temporary password from your Admin. Choose your own to continue.</p>{% endif %}
+    <div class="field"><label>{{ 'Temporary password' if me.must_change_pw else 'Current password' }}</label><input type="password" name="current" required autocomplete="current-password"></div>
+    <div class="field"><label>New password (10+ characters)</label><input type="password" name="new" minlength="10" required autocomplete="new-password"></div>
+    <div class="field"><label>Repeat new password</label><input type="password" name="new2" minlength="10" required autocomplete="new-password"></div>
+    <button class="btn primary">Save password</button>
+  </form>
+</div>
+{% endblock %}

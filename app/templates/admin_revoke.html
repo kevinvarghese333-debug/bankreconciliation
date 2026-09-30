@@ -1,0 +1,67 @@
+{% extends "base.html" %}
+{% block title %}Admin · Revoke · Bank Reco{% endblock %}
+{% block content %}
+{% include "_admin_nav.html" %}
+
+<div class="grid two">
+  <form class="panel" method="get" action="{{ base }}/admin/revoke">
+    <h2>Revoke a reconciled day</h2>
+    <p class="small muted" style="margin-top:0">Removes the reconciliation of that day so it can be done again, for example after
+      a wrong file was uploaded or the ERP was corrected. Each day continues from the one before, so <strong>every later
+      day of the same account is revoked too</strong>. A full copy of each revoked run is kept below.</p>
+    <div class="formgrid">
+      <div class="field"><label>Account</label>
+        <select name="account" required>
+          <option value="">Choose…</option>
+          <option value="all" {{ 'selected' if account == 'all' }}>All accounts</option>
+          {% for a in accounts %}<option value="{{ a.id }}" {{ 'selected' if account == a.id|string }}>{{ a.nickname }} (…{{ a.acc_no[-4:] }}){% if a.last_period %} · up to {{ a.last_period | dmy }}{% endif %}</option>{% endfor %}
+        </select></div>
+      <div class="field"><label>Revoke from this date</label><input type="date" name="from" value="{{ from_s }}" required></div>
+    </div>
+    <button class="btn">Show what will be revoked</button>
+  </form>
+
+  <div class="panel">
+    {% if preview is none %}
+      <h2>Preview</h2><p class="muted" style="margin:0">Choose an account and a date to see exactly which reconciliations would be removed.</p>
+    {% elif not preview %}
+      <h2>Nothing to revoke</h2><p class="muted" style="margin:0">No reconciliation on or after {{ from_d | dmy }} for that selection.</p>
+    {% else %}
+      <h2>{{ preview|length }} reconciliation(s) will be removed</h2>
+      <div class="scroll" style="max-height:260px">
+      <table>
+        <thead><tr><th>Account</th><th>Date</th><th>Run</th><th>By</th><th>Checked by</th></tr></thead>
+        <tbody>{% for r in preview %}
+          <tr><td>{{ r.nickname }} <span class="faint small">…{{ r.acc_no[-4:] }}</span></td>
+              <td class="nowrap">{{ r.period_from | dmy }}{% if r.period_to != r.period_from %} – {{ r.period_to | dmy }}{% endif %}</td>
+              <td><a href="{{ base }}/runs/{{ r.id }}">#{{ r.id }}</a></td><td class="small">{{ r.created_by }}</td>
+              <td class="small">{{ r.checked_by or '—' }}</td></tr>
+        {% endfor %}</tbody>
+      </table>
+      </div>
+      <form method="post" action="{{ base }}/admin/revoke" style="margin-top:12px">
+        <input type="hidden" name="csrf_token" value="{{ csrf }}">
+        <input type="hidden" name="account" value="{{ account }}">
+        <input type="hidden" name="from_date" value="{{ from_s }}">
+        <div class="field"><label>Reason (saved in the audit log)</label><input type="text" name="reason" minlength="15" required placeholder="e.g. Wrong bank book uploaded for 28-09; ERP corrected back-dated voucher"></div>
+        <div class="field"><label>Type <strong>REVOKE</strong> to confirm</label><input type="text" name="confirm" required autocomplete="off" style="max-width:160px"></div>
+        <button class="btn danger">Revoke {{ preview|length }} run(s)</button>
+      </form>
+    {% endif %}
+  </div>
+</div>
+
+<div class="panel tight">
+  <h2 style="padding:12px 14px 0">Revoked reconciliations</h2>
+  {% if not revoked %}<div class="empty">Nothing revoked yet.</div>{% else %}
+  <table>
+    <thead><tr><th>Revoked</th><th>By</th><th>Account</th><th>Day</th><th>Original run</th><th>Reason</th></tr></thead>
+    <tbody>{% for v in revoked %}
+      <tr><td class="nowrap small mono">{{ v.revoked_at }}</td><td class="small">{{ v.revoked_by }}</td><td>{{ v.nickname or '—' }}</td>
+          <td class="nowrap">{{ v.period_from | dmy }}{% if v.period_to != v.period_from %} – {{ v.period_to | dmy }}{% endif %}</td>
+          <td class="small">#{{ v.run_id }} by {{ v.created_by }}</td><td class="small">{{ v.reason }}</td></tr>
+    {% endfor %}</tbody>
+  </table>
+  {% endif %}
+</div>
+{% endblock %}

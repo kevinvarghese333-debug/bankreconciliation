@@ -17,7 +17,14 @@
   {% endfor %}
 </div>
 
-{% if ackable %}
+{% if ackable and not can('ack') %}
+<div class="panel" style="border-color:#e8c46a;background:var(--warn-soft)">
+  <h2>A Manager or Admin must confirm this</h2>
+  <p style="margin:0">These warnings can only be overridden by a Manager or Admin. Ask one of them to upload the same two
+    files and acknowledge with a reason. Nothing has been saved.</p>
+  <ul>{% for a in ackable %}<li>{{ a.message }}</li>{% endfor %}</ul>
+</div>
+{% elif ackable %}
 <form class="panel" method="post" action="{{ base }}/reconcile/ack">
   <input type="hidden" name="csrf_token" value="{{ csrf }}">
   <input type="hidden" name="token" value="{{ token }}">

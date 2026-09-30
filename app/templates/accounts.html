@@ -11,7 +11,7 @@
 </div>
 {% endif %}
 
-<details class="panel" {{ 'open' if not accounts }}>
+{% if can('accounts') %}<details class="panel" {{ 'open' if not accounts }}>
   <summary>Bulk upload from Excel</summary>
   <form method="post" action="{{ base }}/accounts/import" enctype="multipart/form-data" style="margin-top:12px">
     <input type="hidden" name="csrf_token" value="{{ csrf }}">
@@ -26,7 +26,7 @@
     </div>
     <button class="btn primary">Upload accounts</button>
   </form>
-</details>
+</details>{% endif %}
 
 
 <div class="panel tight">
@@ -44,7 +44,7 @@
     <td class="num">{{ a.runs }}</td>
     <td>{% if a.last_run_id %}<a href="{{ base }}/runs/{{ a.last_run_id }}">{{ a.last_period | dmy }}</a>{% else %}<span class="faint">—</span>{% endif %}</td>
     <td>{{ 'Active' if a.active else 'Inactive' }}</td>
-    <td class="num nowrap">{% if a.last_run_id %}<a class="btn small" href="{{ base }}/runs/{{ a.last_run_id }}">View</a> <a class="btn small" href="{{ base }}/history?account={{ a.id }}">History</a> {% endif %}<a class="btn small" href="{{ base }}/accounts?edit={{ a.id }}#form">Edit</a></td>
+    <td class="num nowrap">{% if a.last_run_id %}<a class="btn small" href="{{ base }}/runs/{{ a.last_run_id }}">View</a> <a class="btn small" href="{{ base }}/history?account={{ a.id }}">History</a> {% endif %}{% if can('accounts') %}<a class="btn small" href="{{ base }}/accounts?edit={{ a.id }}#form">Edit</a>{% endif %}</td>
   </tr>
   {% endfor %}
   </tbody>
@@ -53,7 +53,7 @@
 </div>
 
 {% set e = (accounts | selectattr("id","equalto",edit) | first) if edit else None %}
-<form class="panel" method="post" action="{{ base }}/accounts" id="form">
+{% if can('accounts') %}<form class="panel" method="post" action="{{ base }}/accounts" id="form">
   <input type="hidden" name="csrf_token" value="{{ csrf }}">
   {% if e %}<input type="hidden" name="account_id" value="{{ e.id }}">{% endif %}
   <h2>{{ 'Edit account' if e else 'Add account' }}</h2>
@@ -71,16 +71,7 @@
   </div>
   <div class="field"><label>Notes</label><input type="text" name="notes" value="{{ e.notes if e else '' }}"></div>
   <div class="actions"><button class="btn primary">{{ 'Save changes' if e else 'Add account' }}</button>{% if e %}<a class="btn" href="{{ base }}/accounts">Cancel</a>{% endif %}</div>
-</form>
+</form>{% endif %}
 
-<details class="panel">
-  <summary>Change password</summary>
-  <form method="post" action="{{ base }}/password" style="margin-top:12px;max-width:420px">
-    <input type="hidden" name="csrf_token" value="{{ csrf }}">
-    <div class="field"><label>Current password</label><input type="password" name="current" required></div>
-    <div class="field"><label>New password</label><input type="password" name="new" minlength="10" required></div>
-    <div class="field"><label>Repeat new password</label><input type="password" name="new2" minlength="10" required></div>
-    <button class="btn">Change password</button>
-  </form>
-</details>
+<p class="small muted">To change your password, open <a href="{{ base }}/me">My account</a>.</p>
 {% endblock %}

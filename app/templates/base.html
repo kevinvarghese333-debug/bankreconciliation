@@ -14,15 +14,16 @@
   {% set p = request.url.path[base|length:] or '/' %}
   <nav class="nav">
     <a href="{{ base }}/" class="{{ 'on' if p == '/' }}">Dashboard</a>
-    <a href="{{ base }}/reconcile" class="{{ 'on' if p.startswith('/reconcile') }}">New reconciliation</a>
+    {% if can('reconcile') %}<a href="{{ base }}/reconcile" class="{{ 'on' if p.startswith('/reconcile') }}">New reconciliation</a>{% endif %}
     <a href="{{ base }}/open-items" class="{{ 'on' if p.startswith('/open-items') }}">Open items</a>
     <a href="{{ base }}/history" class="{{ 'on' if p.startswith('/history') or p.startswith('/runs') }}">History</a>
     <a href="{{ base }}/accounts" class="{{ 'on' if p.startswith('/accounts') }}">Accounts</a>
     <a href="{{ base }}/holidays" class="{{ 'on' if p.startswith('/holidays') }}">Holidays</a>
-    <a href="{{ base }}/audit" class="{{ 'on' if p.startswith('/audit') }}">Audit log</a>
+    {% if can('audit') %}<a href="{{ base }}/audit" class="{{ 'on' if p.startswith('/audit') }}">Audit log</a>{% endif %}
+    {% if can('admin') %}<a href="{{ base }}/admin" class="{{ 'on' if p.startswith('/admin') }}" style="color:#f5c542">Admin</a>{% endif %}
   </nav>
   <form class="who" method="post" action="{{ base }}/logout">
-    <span>{{ user }}</span>
+    <a href="{{ base }}/me" style="color:inherit;text-decoration:none" title="My account">{{ full_name or user }} <span style="opacity:.7;font-size:12px">· {{ role_label }}</span></a>
     <input type="hidden" name="csrf_token" value="{{ csrf }}">
     <button type="submit">Log out</button>
   </form>

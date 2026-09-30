@@ -8,11 +8,30 @@
     <div class="muted small">Run #{{ run.id }} · {{ account.bank }} …{{ account.acc_no[-4:] }} · {{ 'Main account' if account.kind == 'main' else 'Collection account' }}</div>
     <h1>{{ account.nickname }} — {{ run.period_from | dmy }}{% if run.period_to != run.period_from %} to {{ run.period_to | dmy }}{% endif %}</h1>
     <div class="muted small">By {{ run.created_by }} on {{ run.created_at }} · {{ run.bank_file }} + {{ run.book_file }}</div>
+    <div class="small" style="margin-top:4px">{% if run.checked_by %}<span class="pill ok">✔ Checked by {{ run.checked_by }} · {{ run.checked_at }}</span>{% if run.checked_note %} <span class="muted">{{ run.checked_note }}</span>{% endif %}{% else %}<span class="pill review">Not yet checked</span>{% endif %}</div>
   </div>
   <div class="actions noprint">
+    {% if can('signoff') %}
+      {% if not run.checked_by and run.created_by != user %}
+      <details style="position:relative">
+        <summary class="btn" style="list-style:none">Sign off as checked</summary>
+        <form method="post" action="{{ base }}/runs/{{ run.id }}/signoff" class="panel" style="position:absolute;right:0;top:40px;width:320px;z-index:10;box-shadow:0 8px 24px rgba(0,0,0,.12)">
+          <input type="hidden" name="csrf_token" value="{{ csrf }}">
+          <p class="small" style="margin-top:0">Confirms you have reviewed this BRS and its exceptions. Recorded with your name and time.</p>
+          <input type="text" name="note" placeholder="Remark (optional)">
+          <button class="btn primary" style="margin-top:10px">Sign off</button>
+        </form>
+      </details>
+      {% elif run.checked_by and (run.checked_by == user or can('admin')) %}
+      <form method="post" action="{{ base }}/runs/{{ run.id }}/signoff" style="display:inline">
+        <input type="hidden" name="csrf_token" value="{{ csrf }}"><input type="hidden" name="undo" value="1">
+        <button class="btn">Withdraw sign-off</button>
+      </form>
+      {% endif %}
+    {% endif %}
     <a class="btn primary" href="{{ base }}/runs/{{ run.id }}/excel">Download Excel</a>
     <button class="btn" onclick="window.print()">Print</button>
-    {% if is_latest %}
+    {% if is_latest and can('undo') %}
     <details style="position:relative">
       <summary class="btn danger" style="list-style:none">Undo run</summary>
       <form method="post" action="{{ base }}/runs/{{ run.id }}/undo" class="panel" style="position:absolute;right:0;top:40px;width:320px;z-index:10;box-shadow:0 8px 24px rgba(0,0,0,.12)">
@@ -149,13 +168,13 @@
           <td rowspan="{{ lines|length }}" class="small muted" style="max-width:300px">{{ g.m.note }}{% if g.m.manual %} · by {{ g.m.created_by }}{% endif %}</td>
           {% if is_latest %}
           <td rowspan="{{ lines|length }}" class="noprint">
-            <details><summary class="small faint">Unmatch</summary>
+            {% if can('unmatch') %}<details><summary class="small faint">Unmatch</summary>
               <form method="post" action="{{ base }}/matches/{{ g.m.id }}/unmatch" style="margin-top:6px;min-width:200px">
                 <input type="hidden" name="csrf_token" value="{{ csrf }}"><input type="hidden" name="back" value="{{ back }}#detail">
                 <input type="text" name="reason" placeholder="Reason" required>
                 <button class="btn small" style="margin-top:6px">Unmatch</button>
               </form>
-            </details>
+            </details>{% endif %}
           </td>
           {% endif %}
           {% endif %}
