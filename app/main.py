@@ -1057,9 +1057,3 @@ if ROOT_PATH:
     @app.get("/")
     def outer_root():
         return RedirectResponse(ROOT_PATH + "/", status_code=307)
-
-    # kavitha.cloud/bankreco-admin → the Admin portal (the proxy sends every /bankreco… path here)
-    @app.get(ROOT_PATH + "-admin")
-    @app.get(ROOT_PATH + "-admin/")
-    def outer_admin():
-        return RedirectResponse(ROOT_PATH + "/admin", status_code=307)
