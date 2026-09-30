@@ -43,12 +43,12 @@ jobs:
           set +e
           tar czf - --exclude=.git --exclude=samples --exclude=tests --exclude=data . \
             | ssh -i ~/.ssh/deploy_key -o BatchMode=yes -o StrictHostKeyChecking=accept-new -o ConnectTimeout=25 \
-                  -o IdentitiesOnly=yes root@"$VPS_HOST" deploy 2> ssherr.txt
+                  -o IdentitiesOnly=yes root@"$VPS_HOST" deploy 2> ssherr.txt | tee sshout.txt
           rc=${PIPESTATUS[1]}
           set -e
           cat ssherr.txt
           if [ "$rc" != "0" ]; then
-            echo "::error::Deploy over SSH failed (exit $rc): $(grep -v '^Warning: Permanently added' ssherr.txt | tail -4 | tr '\n' ' ')"
+            echo "::error::Deploy over SSH failed (exit $rc): $(grep -v '^Warning: Permanently added' ssherr.txt | tail -4 | tr '\n' ' ') | Installer said: $(sed 's/\x1b\[[0-9;]*m//g' sshout.txt | grep -v '^\s*$' | tail -8 | tr '\n' ' ')"
             exit 1
           fi
       - name: Check the live site
