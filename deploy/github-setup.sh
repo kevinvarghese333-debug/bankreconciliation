@@ -6,8 +6,10 @@ set -euo pipefail
 [ "$(id -u)" -eq 0 ] || { echo "Run as root"; exit 1; }
 mkdir -p /root/.ssh && chmod 700 /root/.ssh
 KEY=/root/.ssh/bankreco_deploy
-rm -f "$KEY" "$KEY.pub"
-ssh-keygen -q -t ed25519 -N "" -f "$KEY" -C bankreco-github
+if [ "${1:-}" = "--new" ] || [ ! -s "$KEY" ] || [ ! -s "$KEY.pub" ]; then
+  rm -f "$KEY" "$KEY.pub"
+  ssh-keygen -q -t ed25519 -N "" -f "$KEY" -C bankreco-github
+fi
 cat > /usr/local/bin/bankreco-deploy <<'SCRIPT'
 #!/usr/bin/env bash
 # Forced command for the GitHub deploy key: read the app tarball on stdin, install it.
