@@ -1,0 +1,55 @@
+{% from "_items.html" import who, ref, detail %}
+{# expects: open_items, is_latest, account, as_of, back, csrf #}
+{% if not open_items %}
+  <div class="empty">No open items — every bank line and book entry is matched.</div>
+{% else %}
+<div class="toolbar">
+  <input type="text" placeholder="Search name, amount, ref…" data-search="#tb-open">
+  {% if is_latest %}<span class="muted small">Tick a bank line and the book entry(ies) it belongs to, then match them manually. Amounts must be equal.</span>{% endif %}
+</div>
+<div class="scroll">
+<table id="tb-open">
+  <thead><tr>{% if is_latest %}<th class="noprint"></th>{% endif %}<th>Side</th><th>Type</th><th>Date</th><th class="num">Days</th><th>Name</th><th>Reference</th><th>Details</th><th class="num">Amount</th><th>Note</th></tr></thead>
+  <tbody>
+  {% for it in open_items %}
+  {% set age = (as_of - it.date).days %}
+  <tr>
+    {% if is_latest %}<td class="noprint"><input type="checkbox" class="pick" value="{{ it.id }}" data-side="{{ it.side }}" data-dir="{{ it.dir }}" data-amt="{{ it.amount }}"></td>{% endif %}
+    <td class="side">{{ it.side }}</td>
+    <td class="small nowrap">
+      {% if it.side == 'book' and it.dir == 'out' %}<span class="pill high">Paid in book, not in bank</span>
+      {% elif it.side == 'book' %}<span class="pill high">Received in book, not in bank</span>
+      {% elif it.dir == 'out' %}<span class="pill critical">Debit not in book</span>
+      {% else %}<span class="pill review">Credit not in book</span>{% endif %}
+    </td>
+    <td class="nowrap">{{ it.date | dmy }}</td>
+    <td class="num">{% if age >= 3 %}<span style="color:var(--bad);font-weight:650">{{ age }}</span>{% else %}{{ age }}{% endif %}</td>
+    <td>{{ who(it) }}</td>
+    <td>{{ ref(it) }}</td>
+    <td class="small muted" style="max-width:340px">{{ detail(it) }}</td>
+    <td class="num">{{ it.amount | inr }}</td>
+    <td class="small" style="min-width:160px">
+      <form method="post" action="{{ base }}/items/{{ it.id }}/note" class="notef">
+        <input type="hidden" name="csrf_token" value="{{ csrf }}"><input type="hidden" name="back" value="{{ back }}">
+        <input type="text" name="note" value="{{ it.note or '' }}" placeholder="Add note…" style="padding:4px 7px;font-size:12.5px">
+      </form>
+    </td>
+  </tr>
+  {% endfor %}
+  </tbody>
+</table>
+</div>
+{% if is_latest %}
+<form class="selbar noprint" id="selbar" method="post" action="{{ base }}/manual-match">
+  <input type="hidden" name="csrf_token" value="{{ csrf }}">
+  <input type="hidden" name="account_id" value="{{ account.id }}">
+  <input type="hidden" name="item_ids" id="sel-ids">
+  <input type="hidden" name="back" value="{{ back }}">
+  <span class="tot">Bank ₹<b id="sel-bank">0.00</b></span>
+  <span class="tot">Book ₹<b id="sel-book">0.00</b></span>
+  <span class="tot diff" id="sel-diff">Diff ₹0.00</span>
+  <input type="text" name="remark" placeholder="Remark (required) — e.g. confirmed with branch" required>
+  <button class="btn primary" id="sel-go" disabled>Match selected</button>
+</form>
+{% endif %}
+{% endif %}

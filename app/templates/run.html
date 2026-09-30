@@ -1,0 +1,171 @@
+{% extends "base.html" %}
+{% from "_items.html" import who, ref, detail %}
+{% block title %}{{ account.nickname }} {{ run.period_to | dmy }} · Bank Reco{% endblock %}
+{% block content %}
+{% set back = "/runs/" ~ run.id %}
+<div class="pagehead">
+  <div>
+    <div class="muted small">Run #{{ run.id }} · {{ account.bank }} …{{ account.acc_no[-4:] }} · {{ 'Main account' if account.kind == 'main' else 'Collection account' }}</div>
+    <h1>{{ account.nickname }} — {{ run.period_from | dmy }}{% if run.period_to != run.period_from %} to {{ run.period_to | dmy }}{% endif %}</h1>
+    <div class="muted small">By {{ run.created_by }} on {{ run.created_at }} · {{ run.bank_file }} + {{ run.book_file }}</div>
+  </div>
+  <div class="actions noprint">
+    <a class="btn primary" href="{{ base }}/runs/{{ run.id }}/excel">Download Excel</a>
+    <button class="btn" onclick="window.print()">Print</button>
+    {% if is_latest %}
+    <details style="position:relative">
+      <summary class="btn danger" style="list-style:none">Undo run</summary>
+      <form method="post" action="{{ base }}/runs/{{ run.id }}/undo" class="panel" style="position:absolute;right:0;top:40px;width:320px;z-index:10;box-shadow:0 8px 24px rgba(0,0,0,.12)">
+        <input type="hidden" name="csrf_token" value="{{ csrf }}">
+        <p class="small" style="margin-top:0">Removes this run and all its matches. Items it cleared from earlier days become open again. Type <strong>UNDO</strong> to confirm.</p>
+        <input type="text" name="confirm" autocomplete="off" required>
+        <button class="btn danger" style="margin-top:10px">Undo this run</button>
+      </form>
+    </details>
+    {% endif %}
+  </div>
+</div>
+
+{% if not is_latest %}<div class="flash ok" style="background:var(--accent-soft);color:var(--accent)">This is an earlier run. Open items and BRS are shown as they stood at the end of this run; matching actions are only available on the latest run.</div>{% endif %}
+
+<div class="grid cards">
+  <div class="card {{ 'good' if brs.clean else 'bad' }}">
+    <div class="label">BRS difference</div>
+    <div class="value">₹{{ brs.difference | inr }}</div>
+    <div class="sub">{{ 'Reconciled' if brs.clean else ('Unexplained ₹' ~ (brs.opening_diff | inr) ~ ' carried' if brs.tallies else 'Does not tally') }}</div>
+  </div>
+  <div class="card"><div class="label">Bank closing</div><div class="value">₹{{ run.bank_close | inr }}</div><div class="sub">Opening ₹{{ run.bank_open | inr }}</div></div>
+  <div class="card"><div class="label">Book closing</div><div class="value">₹{{ run.book_close | inr }}</div><div class="sub">Opening ₹{{ run.book_open | inr }}</div></div>
+  <div class="card {{ 'bad' if s.bank_out.matched < s.bank_out.count or s.book_out.matched < s.book_out.count }}">
+    <div class="label">Payments matched</div>
+    <div class="value">{{ s.bank_out.matched }} / {{ s.bank_out.count }}</div>
+    <div class="sub">₹{{ s.bank_out.amount | inr }} debited · book {{ s.book_out.matched }}/{{ s.book_out.count }}</div>
+  </div>
+  <div class="card">
+    <div class="label">Collections matched</div>
+    <div class="value">{{ s.bank_in.matched }} / {{ s.bank_in.count }}</div>
+    <div class="sub">₹{{ s.bank_in.amount | inr }} credited · book {{ s.book_in.matched }}/{{ s.book_in.count }}</div>
+  </div>
+</div>
+
+<div class="grid two">
+  <div class="panel">
+    <h2>Bank Reconciliation Statement as at {{ run.period_to | dmy }}</h2>
+    <table class="brs">
+      <tr class="head"><td>Balance as per bank book</td><td class="cnt"></td><td class="amt">{{ brs.book_closing | inr }}</td></tr>
+      <tr><td>Add: Payments entered in book, not yet debited by bank</td><td class="cnt">{{ brs.counts.a }} item(s)</td><td class="amt">{% if brs.add_book_payments_not_debited %}{{ brs.add_book_payments_not_debited | inr }}{% else %}—{% endif %}</td></tr>
+      <tr><td>Less: Receipts entered in book, not yet credited by bank</td><td class="cnt">{{ brs.counts.b }} item(s)</td><td class="amt">{% if brs.less_book_receipts_not_credited %}({{ brs.less_book_receipts_not_credited | inr }}){% else %}—{% endif %}</td></tr>
+      <tr><td>Add: Credits in bank statement, not entered in book</td><td class="cnt">{{ brs.counts.c }} item(s)</td><td class="amt">{% if brs.add_bank_credits_not_in_book %}{{ brs.add_bank_credits_not_in_book | inr }}{% else %}—{% endif %}</td></tr>
+      <tr><td>Less: Debits in bank statement, not entered in book</td><td class="cnt">{{ brs.counts.d }} item(s)</td><td class="amt">{% if brs.less_bank_debits_not_in_book %}({{ brs.less_bank_debits_not_in_book | inr }}){% else %}—{% endif %}</td></tr>
+      {% if brs.opening_diff %}<tr><td>Add/(Less): Opening difference, not itemised</td><td class="cnt"></td><td class="amt">{{ brs.opening_diff | inr }}</td></tr>{% endif %}
+      <tr class="total"><td>Balance as per bank statement (computed)</td><td class="cnt"></td><td class="amt">{{ brs.computed_bank_balance | inr }}</td></tr>
+      <tr><td>Balance as per bank statement (actual)</td><td class="cnt"></td><td class="amt">{{ brs.bank_closing | inr }}</td></tr>
+      <tr class="final"><td>Difference</td><td class="cnt"></td><td class="amt">{{ brs.difference | inr }}</td></tr>
+    </table>
+    {% if brs.tallies and brs.opening_diff %}
+      <div class="verdict bad">⚠ Balances only because of an unexplained difference of ₹{{ brs.opening_diff | inr }} carried from an earlier acknowledgement. Not a clean reconciliation.</div>
+    {% elif brs.tallies %}
+      <div class="verdict ok">✔ Reconciled — difference is nil.{% if s.open_items %} {{ s.open_items }} open item(s) carry forward.{% endif %}</div>
+    {% else %}
+      <div class="verdict bad">✖ Not reconciled — ₹{{ brs.difference | inr }} unexplained. Check the validation results.</div>
+    {% endif %}
+    {% if run.ack_reason %}<p class="small muted" style="margin-bottom:0">Warnings acknowledged: {{ run.ack_reason }}</p>{% endif %}
+  </div>
+
+  <div class="panel tight">
+    <div class="panelhead">
+      <h2 style="margin:0">Exceptions</h2>
+      <div class="chips noprint" data-filter="flags">
+        <button class="chip on" data-sev="all">All {{ flags|length }}</button>
+        {% for sv in ['critical','high','medium','info'] %}{% if s.severity[sv] %}<button class="chip" data-sev="{{ sv }}">{{ sv|capitalize }} {{ s.severity[sv] }}</button>{% endif %}{% endfor %}
+      </div>
+    </div>
+    <div class="scroll" style="max-height:430px" id="flags">
+      {% for f in flags %}
+      <div class="flag" data-sev="{{ f.severity }}">
+        <div><span class="pill {{ f.severity }}">{{ f.severity|upper }}</span></div>
+        <div><div class="t">{{ f.title }}</div><div class="d">{{ f.detail }}</div></div>
+      </div>
+      {% else %}
+      <div class="empty">No exceptions. Every line matched cleanly.</div>
+      {% endfor %}
+    </div>
+  </div>
+</div>
+
+<details class="panel">
+  {% set nok = checks | selectattr("level","equalto","ok") | list | length %}
+  <summary>Validation checks — {{ nok }} passed{% set nw = checks|length - nok %}{% if nw %}, {{ nw }} warning(s){% endif %}</summary>
+  <div style="margin-top:10px">
+  {% for c in checks %}
+    <div class="check">
+      <span class="pill {{ c.level }}" style="min-width:52px;text-align:center">{{ {'ok':'PASS','warning':'WARN','error':'ACK'}[c.level] }}</span>
+      <span class="src">{{ c.source }}</span><span class="msg">{{ c.message }}</span>
+    </div>
+  {% endfor %}
+  </div>
+</details>
+
+<div class="panel tight" id="detail">
+  <div class="tabs" role="tablist">
+    <button class="tab on" data-tab="t-open">Open items <span class="n">{{ open_items|length }}</span></button>
+    <button class="tab" data-tab="t-out">Payments <span class="n">{{ groups.out|length }}</span></button>
+    <button class="tab" data-tab="t-in">Collections <span class="n">{{ groups['in']|length }}</span></button>
+  </div>
+
+  {# ---------------- open items ---------------- #}
+  <div class="tabpane on" id="t-open">
+    {% include "_open_table.html" %}
+  </div>
+
+  {# ---------------- matched ---------------- #}
+  {% for key, label in [('out','Payments'),('in','Collections')] %}
+  <div class="tabpane" id="t-{{ key }}">
+    <div class="toolbar">
+      <input type="text" placeholder="Search name, amount, ref…" data-search="#tb-{{ key }}">
+      <label style="display:flex;gap:6px;align-items:center;margin:0;font-weight:500"><input type="checkbox" data-reviewonly="#tb-{{ key }}"> Only items to verify</label>
+      <span class="muted small">{{ groups[key] | selectattr("m.confidence","equalto","review") | list | length }} to verify</span>
+    </div>
+    <div class="scroll">
+    <table id="tb-{{ key }}">
+      <thead><tr><th>#</th><th>Match</th><th></th><th>Date</th><th>Name</th><th>Reference</th><th class="num">Amount</th><th>Note</th>{% if is_latest %}<th class="noprint"></th>{% endif %}</tr></thead>
+      {% for g in groups[key] %}
+      <tbody data-conf="{{ g.m.confidence }}">
+        {% set lines = g.bank + g.book %}
+        {% for it in lines %}
+        <tr class="{{ 'grp-start' if loop.first }} {{ 'sub' if not loop.last }}">
+          {% if loop.first %}
+          <td rowspan="{{ lines|length }}" class="mono faint">{{ g.m.id }}</td>
+          <td rowspan="{{ lines|length }}" style="max-width:190px"><span class="pill {{ g.m.confidence }}">{{ {'strong':'Matched','review':'Verify','manual':'Manual'}[g.m.confidence] }}</span><div class="small muted" style="margin-top:3px">{{ g.m.method }}</div></td>
+          {% endif %}
+          <td class="side">{{ it.side }}</td>
+          <td class="nowrap">{{ it.date | dmy }}</td>
+          <td>{{ who(it) }}</td>
+          <td>{{ ref(it) }}</td>
+          <td class="num">{{ it.amount | inr }}</td>
+          {% if loop.first %}
+          <td rowspan="{{ lines|length }}" class="small muted" style="max-width:300px">{{ g.m.note }}{% if g.m.manual %} · by {{ g.m.created_by }}{% endif %}</td>
+          {% if is_latest %}
+          <td rowspan="{{ lines|length }}" class="noprint">
+            <details><summary class="small faint">Unmatch</summary>
+              <form method="post" action="{{ base }}/matches/{{ g.m.id }}/unmatch" style="margin-top:6px;min-width:200px">
+                <input type="hidden" name="csrf_token" value="{{ csrf }}"><input type="hidden" name="back" value="{{ back }}#detail">
+                <input type="text" name="reason" placeholder="Reason" required>
+                <button class="btn small" style="margin-top:6px">Unmatch</button>
+              </form>
+            </details>
+          </td>
+          {% endif %}
+          {% endif %}
+        </tr>
+        {% endfor %}
+      </tbody>
+      {% else %}
+      <tbody><tr><td colspan="9" class="empty">Nothing matched on this side.</td></tr></tbody>
+      {% endfor %}
+    </table>
+    </div>
+  </div>
+  {% endfor %}
+</div>
+{% endblock %}

@@ -1,0 +1,16 @@
+{% extends "base.html" %}
+{% block title %}Sign in · Bank Reco{% endblock %}
+{% block auth %}
+<div class="authwrap"><div class="authbox">
+  <div class="brand"><span class="mark">₹</span> Bank Reco</div>
+  <h1>Sign in</h1>
+  <p class="muted" style="margin-top:0">Bank reconciliation workspace</p>
+  {% if flash %}<div class="flash {{ flash.kind }}">{{ flash.msg }}</div>{% endif %}
+  <form method="post" action="{{ base }}/login">
+    <input type="hidden" name="csrf_token" value="{{ csrf }}">
+    <div class="field"><label for="u">Username</label><input id="u" type="text" name="username" autocomplete="username" required autofocus></div>
+    <div class="field"><label for="p">Password</label><input id="p" type="password" name="password" autocomplete="current-password" required></div>
+    <button class="btn primary" style="width:100%;justify-content:center">Sign in</button>
+  </form>
+</div></div>
+{% endblock %}

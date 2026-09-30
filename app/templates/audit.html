@@ -1,0 +1,14 @@
+{% extends "base.html" %}
+{% block title %}Audit log · Bank Reco{% endblock %}
+{% block content %}
+<div class="pagehead"><div><h1>Audit log</h1><div class="muted">Every sign-in, run, manual match, unmatch, note and undo. Latest 1,000 entries.</div></div></div>
+<div class="panel tight">
+  <div class="toolbar"><input type="text" placeholder="Filter…" data-search="#tb-audit"></div>
+  <div class="scroll" style="max-height:none">
+  <table id="tb-audit">
+    <thead><tr><th>When</th><th>User</th><th>Action</th><th>Detail</th></tr></thead>
+    <tbody>{% for r in rows %}<tr><td class="nowrap mono">{{ r.ts }}</td><td>{{ r.username }}</td><td><span class="pill neutral">{{ r.action }}</span></td><td class="small">{{ r.detail }}</td></tr>{% endfor %}</tbody>
+  </table>
+  </div>
+</div>
+{% endblock %}

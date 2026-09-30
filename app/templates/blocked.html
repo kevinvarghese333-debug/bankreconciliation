@@ -1,0 +1,38 @@
+{% extends "base.html" %}
+{% block title %}Checks · Bank Reco{% endblock %}
+{% block content %}
+<div class="pagehead"><div>
+  <h1>{% if ackable %}Please confirm before continuing{% else %}Reconciliation stopped{% endif %}</h1>
+  <div class="muted">{{ account.nickname }} · {{ meta.bank_name }} + {{ meta.book_name }}</div>
+</div></div>
+
+<div class="panel">
+  <h2>Validation checks</h2>
+  {% for c in checks %}
+  <div class="check">
+    <span class="pill {{ c.level }}" style="min-width:52px;text-align:center">{{ {'ok':'PASS','warning':'WARN','error':'FAIL'}[c.level] }}</span>
+    <span class="src">{{ c.source }}</span>
+    <span class="msg">{{ c.message }}{% if c.run_id %} <a class="btn small" href="{{ base }}/runs/{{ c.run_id }}" style="margin-left:6px">View that reconciliation</a>{% endif %}</span>
+  </div>
+  {% endfor %}
+</div>
+
+{% if ackable %}
+<form class="panel" method="post" action="{{ base }}/reconcile/ack">
+  <input type="hidden" name="csrf_token" value="{{ csrf }}">
+  <input type="hidden" name="token" value="{{ token }}">
+  <h2>Proceed anyway?</h2>
+  <p class="muted" style="margin-top:0">These items can be overridden if you understand why they happened. Your reason is saved in the audit log and printed on the BRS.</p>
+  <ul>{% for a in ackable %}<li>{{ a.message }}</li>{% endfor %}</ul>
+  <div class="field"><label for="r">Reason</label><input id="r" type="text" name="reason" required minlength="15" placeholder="e.g. Confirmed this is the SIB …1113 statement for the date"></div>
+  <div class="actions">
+    <button class="btn primary">Acknowledge and reconcile</button>
+  </div>
+</form>
+{% endif %}
+<form method="post" action="{{ base }}/reconcile/cancel" style="margin-top:4px">
+  <input type="hidden" name="csrf_token" value="{{ csrf }}">
+  <input type="hidden" name="token" value="{{ token }}">
+  <button class="btn">Cancel and upload different files</button>
+</form>
+{% endblock %}

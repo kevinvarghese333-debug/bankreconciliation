@@ -1,0 +1,13 @@
+services:
+  bankreco:
+    build: .
+    image: bankreco:latest
+    container_name: bankreco
+    restart: unless-stopped
+    env_file: .env
+    # Bound to localhost only. On the VPS, put your existing web server / reverse proxy
+    # (Nginx, Caddy, Traefik) in front of it with HTTPS — see README.
+    ports:
+      - "127.0.0.1:${PORT:-8077}:8000"
+    volumes:
+      - ./data:/data

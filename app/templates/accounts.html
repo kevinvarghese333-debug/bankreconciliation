@@ -1,0 +1,86 @@
+{% extends "base.html" %}
+{% block title %}Accounts · Bank Reco{% endblock %}
+{% block content %}
+<div class="pagehead"><div><h1>Accounts</h1><div class="muted">Bank accounts to reconcile. Each one has its own ledger in the ERP.</div></div>
+  <div class="actions"><a class="btn" href="{{ base }}/accounts/template">{{ 'Download all accounts (Excel)' if accounts else 'Download Excel template' }}</a></div></div>
+
+{% if import_report %}
+<div class="panel" style="border-color:#e8c46a;background:var(--warn-soft)">
+  <h3>Please check</h3>
+  <ul style="margin:0;padding-left:18px">{% for p in import_report %}<li class="small">{{ p }}</li>{% endfor %}</ul>
+</div>
+{% endif %}
+
+<details class="panel" {{ 'open' if not accounts }}>
+  <summary>Bulk upload from Excel</summary>
+  <form method="post" action="{{ base }}/accounts/import" enctype="multipart/form-data" style="margin-top:12px">
+    <input type="hidden" name="csrf_token" value="{{ csrf }}">
+    <p class="muted small" style="margin-top:0">Use the template (Bank, Account number, Nickname, Type, Branch, Notes, Active), or any simple list such as
+      <em>Branch | SOUTH INDIAN BANK A/C NO 0058…1317</em>. Uploading again updates existing accounts; nothing is deleted.</p>
+    <div class="formgrid">
+      <div class="field"><label>Excel / CSV file</label><input type="file" name="file" accept=".xlsx,.xls,.csv" required></div>
+      <div class="field"><label>Type when the file doesn't say</label>
+        <select name="default_kind"><option value="collection">Collection</option><option value="main">Main</option></select></div>
+      <div class="field"><label>Main account(s) — last 4 digits</label><input type="text" name="main_last4" placeholder="e.g. 1113" value="{{ '' if accounts else '1113' }}">
+        <div class="hint">Comma-separated. Only used when the file has no Type column.</div></div>
+    </div>
+    <button class="btn primary">Upload accounts</button>
+  </form>
+</details>
+
+
+<div class="panel tight">
+{% if not accounts %}<div class="empty">No accounts yet — add the first one below.</div>{% else %}
+<table>
+  <thead><tr><th>Nickname</th><th>Bank</th><th>Account no.</th><th>Type</th><th>Branch</th><th class="num">Runs</th><th>Reconciled up to</th><th>Status</th><th></th></tr></thead>
+  <tbody>
+  {% for a in accounts %}
+  <tr>
+    <td><strong>{{ a.nickname }}</strong>{% if a.notes %}<div class="faint small">{{ a.notes }}</div>{% endif %}</td>
+    <td>{{ a.bank }}</td>
+    <td class="mono">{{ a.acc_no }}</td>
+    <td><span class="pill {{ 'info' if a.kind == 'main' else 'neutral' }}">{{ 'Main (payments)' if a.kind == 'main' else 'Collection' }}</span></td>
+    <td>{{ a.branch }}</td>
+    <td class="num">{{ a.runs }}</td>
+    <td>{% if a.last_run_id %}<a href="{{ base }}/runs/{{ a.last_run_id }}">{{ a.last_period | dmy }}</a>{% else %}<span class="faint">—</span>{% endif %}</td>
+    <td>{{ 'Active' if a.active else 'Inactive' }}</td>
+    <td class="num nowrap">{% if a.last_run_id %}<a class="btn small" href="{{ base }}/runs/{{ a.last_run_id }}">View</a> <a class="btn small" href="{{ base }}/history?account={{ a.id }}">History</a> {% endif %}<a class="btn small" href="{{ base }}/accounts?edit={{ a.id }}#form">Edit</a></td>
+  </tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% endif %}
+</div>
+
+{% set e = (accounts | selectattr("id","equalto",edit) | first) if edit else None %}
+<form class="panel" method="post" action="{{ base }}/accounts" id="form">
+  <input type="hidden" name="csrf_token" value="{{ csrf }}">
+  {% if e %}<input type="hidden" name="account_id" value="{{ e.id }}">{% endif %}
+  <h2>{{ 'Edit account' if e else 'Add account' }}</h2>
+  <div class="formgrid">
+    <div class="field"><label>Bank</label><input type="text" name="bank" value="{{ e.bank if e else 'South Indian Bank' }}" required></div>
+    <div class="field"><label>Account number</label><input type="text" name="acc_no" value="{{ e.acc_no if e else '' }}" inputmode="numeric" required placeholder="Full number, or at least last 4"></div>
+    <div class="field"><label>Nickname</label><input type="text" name="nickname" value="{{ e.nickname if e else '' }}" required placeholder="e.g. SIB 1113 Main / North Paravur collection"></div>
+    <div class="field"><label>Type</label>
+      <select name="kind">
+        <option value="main" {{ 'selected' if e and e.kind == 'main' }}>Main — disbursements & payments</option>
+        <option value="collection" {{ 'selected' if e and e.kind == 'collection' }}>Collection — only receipts + day-end sweep</option>
+      </select></div>
+    <div class="field"><label>Branch</label><input type="text" name="branch" value="{{ e.branch if e else '' }}"></div>
+    <div class="field"><label>Status</label><select name="active"><option value="1">Active</option><option value="0" {{ 'selected' if e and not e.active }}>Inactive</option></select></div>
+  </div>
+  <div class="field"><label>Notes</label><input type="text" name="notes" value="{{ e.notes if e else '' }}"></div>
+  <div class="actions"><button class="btn primary">{{ 'Save changes' if e else 'Add account' }}</button>{% if e %}<a class="btn" href="{{ base }}/accounts">Cancel</a>{% endif %}</div>
+</form>
+
+<details class="panel">
+  <summary>Change password</summary>
+  <form method="post" action="{{ base }}/password" style="margin-top:12px;max-width:420px">
+    <input type="hidden" name="csrf_token" value="{{ csrf }}">
+    <div class="field"><label>Current password</label><input type="password" name="current" required></div>
+    <div class="field"><label>New password</label><input type="password" name="new" minlength="10" required></div>
+    <div class="field"><label>Repeat new password</label><input type="password" name="new2" minlength="10" required></div>
+    <button class="btn">Change password</button>
+  </form>
+</details>
+{% endblock %}

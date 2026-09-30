@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{% block title %}Bank Reconciliation{% endblock %}</title>
+<link rel="stylesheet" href="{{ base }}/static/style.css">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='7' fill='%231f3a5f'/><text x='16' y='22' font-size='16' text-anchor='middle' fill='white' font-family='Arial' font-weight='bold'>₹</text></svg>">
+</head>
+<body>
+{% if user %}
+<header class="topbar"><div class="inner">
+  <a class="brand" href="{{ base }}/"><span class="mark">₹</span> Bank Reco</a>
+  {% set p = request.url.path[base|length:] or '/' %}
+  <nav class="nav">
+    <a href="{{ base }}/" class="{{ 'on' if p == '/' }}">Dashboard</a>
+    <a href="{{ base }}/reconcile" class="{{ 'on' if p.startswith('/reconcile') }}">New reconciliation</a>
+    <a href="{{ base }}/open-items" class="{{ 'on' if p.startswith('/open-items') }}">Open items</a>
+    <a href="{{ base }}/history" class="{{ 'on' if p.startswith('/history') or p.startswith('/runs') }}">History</a>
+    <a href="{{ base }}/accounts" class="{{ 'on' if p.startswith('/accounts') }}">Accounts</a>
+    <a href="{{ base }}/audit" class="{{ 'on' if p.startswith('/audit') }}">Audit log</a>
+  </nav>
+  <form class="who" method="post" action="{{ base }}/logout">
+    <span>{{ user }}</span>
+    <input type="hidden" name="csrf_token" value="{{ csrf }}">
+    <button type="submit">Log out</button>
+  </form>
+</div></header>
+<main>
+  {% if flash %}<div class="flash {{ flash.kind }}">{{ flash.msg }}</div>{% endif %}
+  {% block content %}{% endblock %}
+</main>
+{% else %}
+  {% block auth %}{% endblock %}
+{% endif %}
+<script src="{{ base }}/static/app.js"></script>
+</body>
+</html>

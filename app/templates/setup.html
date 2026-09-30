@@ -1,0 +1,17 @@
+{% extends "base.html" %}
+{% block title %}Set up · Bank Reco{% endblock %}
+{% block auth %}
+<div class="authwrap"><div class="authbox">
+  <div class="brand"><span class="mark">₹</span> Bank Reco</div>
+  <h1>Create your login</h1>
+  <p class="muted" style="margin-top:0">First start. This is the only login for the app.</p>
+  {% if flash %}<div class="flash {{ flash.kind }}">{{ flash.msg }}</div>{% endif %}
+  <form method="post" action="{{ base }}/setup">
+    <input type="hidden" name="csrf_token" value="{{ csrf }}">
+    <div class="field"><label for="u">Username</label><input id="u" type="text" name="username" required autofocus></div>
+    <div class="field"><label for="p">Password</label><input id="p" type="password" name="password" minlength="10" required><div class="hint">At least 10 characters.</div></div>
+    <div class="field"><label for="p2">Repeat password</label><input id="p2" type="password" name="password2" minlength="10" required></div>
+    <button class="btn primary" style="width:100%;justify-content:center">Create login</button>
+  </form>
+</div></div>
+{% endblock %}

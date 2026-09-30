@@ -1,0 +1,27 @@
+{% extends "base.html" %}
+{% block title %}Open items · Bank Reco{% endblock %}
+{% block content %}
+<div class="pagehead">
+  <div><h1>Open items</h1><div class="muted">Everything not yet matched, carried forward until it clears.</div></div>
+  <form method="get" action="{{ base }}/open-items" style="min-width:320px">
+    <select name="account" onchange="this.form.submit()">
+      {% for a in accounts if a.last %}
+      <option value="{{ a.id }}" {{ 'selected' if account and account.id == a.id }}>{{ a.nickname }} — …{{ a.acc_no[-4:] }} ({{ a.open_count }} open)</option>
+      {% endfor %}
+    </select>
+  </form>
+</div>
+{% if not last %}
+  <div class="panel empty">No reconciliations yet.</div>
+{% else %}
+  {% set is_latest = True %}
+  {% set open_items = items %}
+  {% set back = "/open-items?account=" ~ account.id %}
+  <div class="grid cards">
+    <div class="card"><div class="label">As at</div><div class="value">{{ last.period_to | dmy }}</div><div class="sub"><a href="{{ base }}/runs/{{ last.id }}">Run #{{ last.id }}</a></div></div>
+    <div class="card"><div class="label">Bank side open</div><div class="value">₹{{ account.open_bank | inr }}</div><div class="sub">{{ items | selectattr("side","equalto","bank") | list | length }} line(s)</div></div>
+    <div class="card"><div class="label">Book side open</div><div class="value">₹{{ account.open_book | inr }}</div><div class="sub">{{ items | selectattr("side","equalto","book") | list | length }} entr(ies)</div></div>
+  </div>
+  <div class="panel tight">{% include "_open_table.html" %}</div>
+{% endif %}
+{% endblock %}

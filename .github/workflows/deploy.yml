@@ -1,0 +1,47 @@
+name: Test and deploy
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: deploy
+  cancel-in-progress: false
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -r requirements.txt pytest httpx
+      - run: python -m pytest -q
+
+  deploy:
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Ship to the VPS and run the installer
+        env:
+          SSH_KEY: ${{ secrets.VPS_SSH_KEY }}
+          VPS_HOST: ${{ vars.VPS_HOST || '200.234.34.123' }}
+        run: |
+          test -n "$SSH_KEY" || { echo "::error::Secret VPS_SSH_KEY is not set (repo Settings → Secrets and variables → Actions)"; exit 1; }
+          mkdir -p ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          ssh-keyscan -H "$VPS_HOST" >> ~/.ssh/known_hosts 2>/dev/null
+          # The key on the server is locked to /usr/local/bin/bankreco-deploy: it can only receive this tarball and run the installer.
+          tar czf - --exclude=.git --exclude=samples --exclude=tests --exclude=data . \
+            | ssh -i ~/.ssh/deploy_key -o BatchMode=yes root@"$VPS_HOST" deploy
+      - name: Check the live site
+        run: |
+          for i in $(seq 1 18); do
+            if curl -fsS https://kavitha.cloud/bankreco/healthz; then echo; echo "Live."; exit 0; fi
+            sleep 10
+          done
+          echo "::error::Site did not answer on /bankreco/healthz within 3 minutes"; exit 1

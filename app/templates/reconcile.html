@@ -1,0 +1,51 @@
+{% extends "base.html" %}
+{% block title %}New reconciliation · Bank Reco{% endblock %}
+{% block content %}
+<div class="pagehead"><div><h1>New reconciliation</h1><div class="muted">One account, one day (or a range). Both files must cover the same date(s).</div></div></div>
+{% if not accounts %}
+<div class="panel empty">Add an account first on the <a href="{{ base }}/accounts">Accounts</a> page.</div>
+{% else %}
+<form class="panel" method="post" action="{{ base }}/reconcile" enctype="multipart/form-data" id="recoform">
+  <input type="hidden" name="csrf_token" value="{{ csrf }}">
+  <div class="field" style="max-width:520px">
+    <label for="acc">Bank account</label>
+    <select id="acc" name="account_id" required>
+      <option value="">Choose account…</option>
+      {% for a in accounts %}
+      <option value="{{ a.id }}" {{ 'selected' if preselect == a.id }}
+        data-next="{{ a.last.period_to if a.last else '' }}" data-run="{{ a.last.id if a.last else '' }}">{{ a.nickname }} — {{ a.bank }} …{{ a.acc_no[-4:] }}{% if a.last %} (done up to {{ a.last.period_to | dmy }}){% endif %}</option>
+      {% endfor %}
+    </select>
+    <div class="hint" id="nexthint"></div>
+    <a class="btn small" id="viewlast" href="#" style="display:none;margin-top:8px">View last reconciliation</a>
+  </div>
+  <div class="drops">
+    <div class="drop" id="d1">
+      <input type="file" name="bank_file" accept=".xls,.xlsx,.csv" required>
+      <div class="t">1 · Bank statement</div>
+      <div class="muted small">SIB "OpTransactionHistory" .xls from net banking</div>
+      <div class="f"></div>
+    </div>
+    <div class="drop" id="d2">
+      <input type="file" name="book_file" accept=".xls,.xlsx,.csv" required>
+      <div class="t">2 · Bank book from ERP</div>
+      <div class="muted small">Bank Book report .xlsx for the same ledger and date</div>
+      <div class="f"></div>
+    </div>
+  </div>
+  <div style="margin-top:18px;display:flex;gap:12px;align-items:center">
+    <button class="btn primary" id="go">Reconcile</button>
+    <span class="muted small" id="busy" style="display:none">Checking and matching…</span>
+  </div>
+</form>
+<div class="panel">
+  <h3>What happens</h3>
+  <ol class="muted" style="margin:0;padding-left:18px">
+    <li>Both files are checked: running balance on every statement row, and opening + entries = closing for every branch in the bank book.</li>
+    <li>Opening balances must agree with yesterday's closing and with the open items carried forward. A missing day or a back-dated ERP entry stops the run.</li>
+    <li>Payments are matched one-to-one by amount and beneficiary. Collections are matched by UTR last‑4, then amount + name, then grouped.</li>
+    <li>You get a BRS that must show a nil difference, a list of exceptions, and an Excel file.</li>
+  </ol>
+</div>
+{% endif %}
+{% endblock %}

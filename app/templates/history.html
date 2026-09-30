@@ -1,0 +1,40 @@
+{% extends "base.html" %}
+{% block title %}History · Bank Reco{% endblock %}
+{% block content %}
+<div class="pagehead">
+  <div><h1>History</h1><div class="muted">Every reconciliation run. Only the latest run of an account can be undone.</div></div>
+  <form method="get" action="{{ base }}/history" style="min-width:300px">
+    <select name="account" onchange="this.form.submit()">
+      <option value="">All accounts</option>
+      {% for a in accounts %}<option value="{{ a.id }}" {{ 'selected' if sel == a.id }}>{{ a.nickname }} — …{{ a.acc_no[-4:] }}</option>{% endfor %}
+    </select>
+  </form>
+</div>
+<div class="panel tight">
+{% if not runs %}<div class="empty">No runs yet.</div>{% else %}
+<div class="scroll" style="max-height:none">
+<table>
+  <thead><tr><th>Run</th><th>Account</th><th>Period</th><th class="num">Bank closing</th><th class="num">Book closing</th><th>BRS</th><th class="num">Payments</th><th class="num">Collections</th><th class="num">Open after</th><th>Exceptions</th><th>By</th><th></th></tr></thead>
+  <tbody>
+  {% for r in runs %}
+  <tr>
+    <td><a href="{{ base }}/runs/{{ r.id }}">#{{ r.id }}</a>{% if r.is_latest %} <span class="pill neutral">latest</span>{% endif %}</td>
+    <td>{{ r.nickname }} <span class="faint small">…{{ r.acc_no[-4:] }}</span></td>
+    <td class="nowrap">{{ r.period_from | dmy }}{% if r.period_to != r.period_from %} – {{ r.period_to | dmy }}{% endif %}</td>
+    <td class="num">{{ r.bank_close | inr }}</td>
+    <td class="num">{{ r.book_close | inr }}</td>
+    <td>{% if r.brs.clean %}<span class="pill ok">Tallied</span>{% elif r.brs.tallies %}<span class="pill bad">Unexplained {{ r.brs.opening_diff | inr }}</span>{% else %}<span class="pill bad">Diff {{ r.brs.difference | inr }}</span>{% endif %}</td>
+    <td class="num">{{ r.summary.bank_out.matched }}/{{ r.summary.bank_out.count }}</td>
+    <td class="num">{{ r.summary.bank_in.matched }}/{{ r.summary.bank_in.count }}</td>
+    <td class="num">{{ r.summary.open_items }}</td>
+    <td>{% set sv = r.summary.severity %}{% if sv.critical %}<span class="pill critical">{{ sv.critical }}</span> {% endif %}{% if sv.high %}<span class="pill high">{{ sv.high }}</span> {% endif %}{% if sv.medium %}<span class="pill medium">{{ sv.medium }}</span>{% endif %}</td>
+    <td class="small muted nowrap">{{ r.created_by }} · {{ r.created_at[:16] }}</td>
+    <td class="num nowrap"><a class="btn small" href="{{ base }}/runs/{{ r.id }}">View</a> <a class="btn small" href="{{ base }}/runs/{{ r.id }}/excel">Excel</a></td>
+  </tr>
+  {% endfor %}
+  </tbody>
+</table>
+</div>
+{% endif %}
+</div>
+{% endblock %}

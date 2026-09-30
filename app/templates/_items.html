@@ -1,0 +1,20 @@
+{# Macros for rendering bank / book lines #}
+{% macro who(it) -%}
+  {%- if it.side == 'bank' -%}
+    {{ it.name or it.text[:48] }}
+  {%- else -%}
+    {{ it.name or (it.narration or '')[:48] }}
+  {%- endif -%}
+{%- endmacro %}
+
+{% macro ref(it) -%}
+  {%- if it.side == 'bank' -%}
+    <span class="mono">{{ it.ref or it.cheque or '—' }}</span>{% if it.seq %} <span class="faint small">seq {{ it.seq }}</span>{% endif %}
+  {%- else -%}
+    <span class="mono">Vchr {{ it.vno }}</span>{% if it.l4 %} <span class="faint small">ref …{{ it.l4 }}</span>{% endif %}{% if it.loan_ac %}<div class="faint small mono">{{ it.loan_type }} {{ it.loan_ac }}</div>{% endif %}
+  {%- endif -%}
+{%- endmacro %}
+
+{% macro detail(it) -%}
+  {%- if it.side == 'bank' -%}{{ it.text }}{%- else -%}{{ it.narration }}{% if it.branch %} · {{ it.branch }}{% endif %}{%- endif -%}
+{%- endmacro %}
