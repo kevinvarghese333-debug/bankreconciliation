@@ -158,7 +158,45 @@ def parse_narration(text: str) -> dict:
     t = str(text or "").strip()
     parts = [p.strip() for p in t.split("/")]
     head = parts[0].upper() if parts else ""
-    out = {"channel": "", "ref": "", "seq": "", "name": ""}
+    up = t.upper()
+    out = {"channel": "", "ref": "", "seq": "", "name": "", "branch": ""}
+    # Day-end sweep from a collection account: "TR FROM CHERAI BRANCH/", "TR FRM EDAVANAKKAD BRANCH 73.1138/",
+    # "FROM MANJAPRA BRANCH/", "TR FROM 58.73.1156 THIRUVANKULAM BRANCH/", "TR FROM KUNNUKARA BRA/"
+    m = re.match(r"^\s*(?:TR\.?\s*)?(?:FROM|FRM)\s+(.+?)\s*/?\s*$", up)
+    if m and "/" not in m.group(1):
+        br = re.sub(r"[\d.]+", " ", m.group(1))
+        br = re.sub(r"\b(BRANCH|BRA|BR)\b", " ", br)
+        br = re.sub(r"\s+", " ", br).strip()
+        acc = re.search(r"(\d{2}\.\d{2}\.)?(\d{4})\b", m.group(1))
+        out.update(channel="SWEEP", name=br, branch=br, ref=acc.group(2) if acc else "")
+        return out
+    if up.startswith("BY CASH"):
+        br = re.search(r"BR:\s*([^/]+)", up)
+        out.update(channel="CASH", name="CASH DEPOSIT" + (f" {br.group(1).strip()}" if br else ""),
+                   branch=br.group(1).strip() if br else "")
+        return out
+    if up.startswith("RTGS") or up.startswith("NEFT TO") or up.startswith("NEFT FROM"):
+        # "RTGS TO:SIBLH26272448778:K O VARGHESE/"
+        bits = [b.strip() for b in re.split(r"[:/]", t) if b.strip()]
+        ref = next((b for b in bits if re.fullmatch(r"[A-Z]{4}[A-Z0-9]{8,}|\d{12,}", b.upper())), "")
+        names = [b for b in bits[1:] if b != ref and re.search(r"[A-Za-z]{3,}", b)]
+        out.update(channel=up.split()[0].split(":")[0], ref=ref, name=names[-1] if names else "")
+        return out
+    if head == "IB" and len(parts) >= 3:
+        # "IB/KUTHIYATHODE/CHIEF ENGINEER( II , CR AND CAPS)/INTER BRANCH"
+        out.update(channel="IB", branch=parts[1], name=parts[2])
+        out["name"] = re.sub(r"\s+", " ", out["name"]).strip()
+        return out
+    if head.startswith("BILLDESK"):
+        m2 = re.match(r"BILLDESK-(.+?)-(\d+)-", t, re.I)
+        out.update(channel="BILLDESK", name=m2.group(1) if m2 else t, ref=m2.group(2) if m2 else "")
+        return out
+    if head == "RAP" and len(parts) >= 3 and parts[2].upper().startswith("RAP-REV"):
+        # returned / reversed API disbursal: "RAP/<utr>/RAP-REV/ /SHAHANABI FI/6272151413/"
+        names = [x for x in parts[3:] if re.search(r"[A-Za-z]{2,}", x)]
+        out.update(channel="RAP-REV", ref=parts[1], name=names[0] if names else "")
+        out["name"] = re.sub(r"\s+", " ", out["name"]).strip()
+        return out
     if head == "RAP" and len(parts) >= 4:
         out.update(channel="RAP", ref=parts[1], seq=parts[2].lstrip("0"), name=parts[3])
     elif head == "UPI" and len(parts) >= 4:

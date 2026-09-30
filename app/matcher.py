@@ -83,6 +83,21 @@ def strong_name(a: str, b: str) -> float | None:
     return s if s >= STRONG and given_names_agree(a, b) else None
 
 
+_GENERIC = {"BRANCH", "NORTH", "SOUTH", "EAST", "WEST", "ROAD", "JUNCTION", "KAVALA", "TRANSFER", "FROM",
+            "ACCOUNT", "COLLECTION", "SWEEP", "RECEIVED", "BANK", "SOUTH", "INDIAN", "INTER"}
+
+
+def branch_score(branch: str, hay: str) -> float:
+    """Best match of any distinctive place-name word of `branch` against the words of `hay`
+    (KALADY~KALADI, AZHIKODE~AZHICODE); multi-word names must also agree on their other words when present."""
+    words = [w for w in branch.split() if len(w) >= 4 and w not in _GENERIC]
+    hw = [w for w in hay.split() if len(w) >= 4]
+    if not words or not hw:
+        return 0.0
+    best = [max(fuzz.ratio(w, h) for h in hw) for w in words]
+    return float(max(best))
+
+
 def same_amount(a: float, b: float) -> bool:
     return abs(a - b) <= TOL
 
@@ -204,6 +219,7 @@ class Matcher:
     def run(self) -> list[dict]:
         for direction in ("out", "in"):
             self.reference_pass(direction)
+            self.sweep_pass(direction)
             if direction == "in":
                 self.utr_l4_passes()
             self.pair_pass(direction, lambda b, k: strong_name(b["name"], k["name"]), "Amount + name", "strong")
@@ -259,6 +275,31 @@ class Matcher:
                     self.add([b], [k], "Reference + amount", "strong" if ok_name else "review",
                              f"Ref {hit}" + ("" if ok_name else f" — but names differ: bank '{b['name']}' vs book '{k['name']}'"))
                     break
+
+    def sweep_pass(self, direction):
+        """Day-end sweeps between SIB accounts ("TR FROM CHERAI BRANCH"): same amount and the branch
+        name appears in the ERP entry (branch column, narration or notes). Spelling variants
+        (KALADY/Kaladi, AZHIKODE/Azhicode) are tolerated."""
+        banks = [b for b in self.free(self.bank, direction) if b.get("channel") in ("SWEEP", "IB", "CASH")]
+        for b in banks:
+            br = clean_name(b.get("branch") or b.get("name"))
+            if not br:
+                continue
+            cands = []
+            for k in self.free(self.book, direction):
+                if not same_amount(b["amount"], k["amount"]) or not self.ok_dates(b, k):
+                    continue
+                hay = clean_name(" ".join([k.get("branch", ""), k.get("text", ""), k.get("name", "")]))
+                sc = branch_score(br, hay)
+                if sc >= 80:
+                    cands.append((sc, k))
+            if cands:
+                cands.sort(key=lambda x: -x[0])
+                sc, k = cands[0]
+                ambiguous = len(cands) > 1 and cands[1][0] >= sc - 3
+                label = {"SWEEP": "Sweep from branch", "IB": "Inter-branch credit", "CASH": "Cash deposit"}[b["channel"]]
+                self.add([b], [k], label + " + amount", "review" if ambiguous else "strong",
+                         f"{b['branch'] or b['name']}" + (" — another entry has the same amount; confirm" if ambiguous else ""))
 
     def utr_l4_passes(self):
         """ERP 'Instrument.Det' holds the last 4 digits of the UPI reference."""
@@ -437,6 +478,14 @@ def build_flags(bank: list[dict], book: list[dict], matches: list[dict], account
           + "; ".join(f"{n} × {k}" for k, n in sorted(kinds.items(), key=lambda x: -x[1]))
           + ". Usually a relative paying for the borrower. Spot-check in the Collections tab → 'Only items to verify'.",
           [x for m, _ in soft_in for x in (*m["bank"], *m["book"])])
+
+    # returned disbursals: the borrower was NOT paid, whatever the matching says
+    for b in bank:
+        if b.get("channel") == "RAP-REV" and not b.get("carried"):
+            f("high", "RAP_RETURNED", "Disbursal returned by the bank (RAP-REV)",
+              f"{b['date']:%d-%m-%Y} · ₹{inr(b['amount'])} · {b['name']} · ref {b.get('ref','')}. The borrower did not "
+              "receive this payment: confirm the loan is reversed or re-paid, and the bank book shows the return.",
+              [b["key"]])
 
     # collection account: every outflow is listed
     if account_type == "collection":

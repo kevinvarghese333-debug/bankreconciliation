@@ -38,7 +38,7 @@ def bank_item(r: dict) -> dict:
         "side": "bank", "dir": "out" if r["withdrawal"] else "in",
         "date": r["date"], "amount": r["withdrawal"] or r["deposit"],
         "name": r["name"], "ref": r["ref"], "cheque": r["cheque"], "channel": r["channel"],
-        "seq": r.get("seq", ""), "text": r["narration"], "row_no": r["row_no"], "sl": r["sl"],
+        "seq": r.get("seq", ""), "branch": r.get("branch", ""), "text": r["narration"], "row_no": r["row_no"], "sl": r["sl"],
         "balance": r["balance"], "value_date": r["value_date"],
     }
 

@@ -13,8 +13,8 @@ jobs:
   test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
       - run: pip install -r requirements.txt pytest httpx
@@ -24,20 +24,33 @@ jobs:
     needs: test
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Ship to the VPS and run the installer
         env:
           SSH_KEY: ${{ secrets.VPS_SSH_KEY }}
           VPS_HOST: ${{ vars.VPS_HOST || '200.234.34.123' }}
         run: |
           test -n "$SSH_KEY" || { echo "::error::Secret VPS_SSH_KEY is not set (repo Settings → Secrets and variables → Actions)"; exit 1; }
-          mkdir -p ~/.ssh
-          printf '%s\n' "$SSH_KEY" > ~/.ssh/deploy_key
+          mkdir -p ~/.ssh && chmod 700 ~/.ssh
+          printf '%s\n' "$SSH_KEY" | tr -d '\r' > ~/.ssh/deploy_key
           chmod 600 ~/.ssh/deploy_key
-          ssh-keyscan -H "$VPS_HOST" >> ~/.ssh/known_hosts 2>/dev/null
+          if ! ssh-keygen -y -f ~/.ssh/deploy_key > /dev/null 2> keyerr.txt; then
+            echo "::error::VPS_SSH_KEY is not a valid private key — paste the whole block including the BEGIN and END lines. ($(tr '\n' ' ' < keyerr.txt))"
+            exit 1
+          fi
+          echo "Key fingerprint: $(ssh-keygen -lf ~/.ssh/deploy_key)"
           # The key on the server is locked to /usr/local/bin/bankreco-deploy: it can only receive this tarball and run the installer.
+          set +e
           tar czf - --exclude=.git --exclude=samples --exclude=tests --exclude=data . \
-            | ssh -i ~/.ssh/deploy_key -o BatchMode=yes root@"$VPS_HOST" deploy
+            | ssh -i ~/.ssh/deploy_key -o BatchMode=yes -o StrictHostKeyChecking=accept-new -o ConnectTimeout=25 \
+                  -o IdentitiesOnly=yes root@"$VPS_HOST" deploy 2> ssherr.txt
+          rc=${PIPESTATUS[1]}
+          set -e
+          cat ssherr.txt
+          if [ "$rc" != "0" ]; then
+            echo "::error::Deploy over SSH failed (exit $rc): $(grep -v '^Warning: Permanently added' ssherr.txt | tail -4 | tr '\n' ' ')"
+            exit 1
+          fi
       - name: Check the live site
         run: |
           for i in $(seq 1 18); do

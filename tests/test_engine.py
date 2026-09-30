@@ -358,3 +358,32 @@ def test_accounts_bulk_import(conn, tmp_path):
     assert r1["added"] == 4
     r2 = apply_import(conn, rows, "t")
     assert r2["added"] == 0 and r2["unchanged"] == 4
+
+
+def test_new_narrations_and_sweeps(conn, tmp_path):
+    """29-09-2026 SIB statement: sweeps, cash, RTGS, IMPS, IB all match a book booked by branch name."""
+    src = SAMPLES / "SIB_1113_29-09-2026.xls"
+    if not src.exists():
+        pytest.skip("sample not present")
+    from app.parsers import parse_bank_statement
+    st = parse_bank_statement(src)
+    branches = {"KALADY": "Kaladi", "AZHIKODE": "Azhicode", "KUTHIATHODE": "Kuthiyathode",
+                "EAST KADUNGALLUR ALUVA": "East Kadungallur", "MUTTUCHIRA KADUTHURUTHY": "Muttuchira"}
+    entries = []
+    for n, r in enumerate(st["rows"], 1):
+        if r["channel"] == "SWEEP":
+            br = branches.get(r["branch"], r["branch"].title())
+            entries.append(dict(vno=n, vtype="CT", name="", receipt=r["deposit"],
+                                narration=f"Transfer from {br} collection account", ))
+        elif r["deposit"]:
+            entries.append(dict(vno=n, name=r["name"], receipt=r["deposit"]))
+        else:
+            entries.append(dict(vno=n, name=r["name"], payment=r["withdrawal"]))
+    k = tmp_path / "k.xlsx"
+    write_book(k, st["period_from"], st["opening"], entries)
+    rid = run(conn, 1, src, k)
+    b = brs(conn, rid)
+    assert b["tallies"] and b["counts"] == {"a": 0, "b": 0, "c": 0, "d": 0}, b
+    methods = [m["method"] for m in conn.execute("SELECT method FROM matches WHERE run_id=?", (rid,))]
+    assert sum(m.startswith("Sweep from branch") for m in methods) == 33
+    assert "RAP_RETURNED" in codes(conn, rid)
