@@ -84,6 +84,12 @@ CREATE TABLE IF NOT EXISTS audit (
     action TEXT NOT NULL,
     detail TEXT DEFAULT ''
 );
+CREATE TABLE IF NOT EXISTS holidays (
+    day TEXT PRIMARY KEY,
+    name TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL,
+    created_by TEXT NOT NULL DEFAULT ''
+);
 CREATE TABLE IF NOT EXISTS settings (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL

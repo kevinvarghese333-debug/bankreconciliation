@@ -475,3 +475,41 @@ def test_holiday_run_pages_render(conn, tmp_path):
     wb = openpyxl.load_workbook(BytesIO(x.content))
     assert "holiday" in wb["BRS"]["A13"].value
     assert any("Holiday: received Sun 27-09-2026" == (r[10].value or "") for r in wb["Open Items"].iter_rows(min_row=4))
+
+
+def test_listed_bank_holiday_backdated_entry(conn, tmp_path):
+    tue, fri, sat = date(2026, 9, 29), date(2026, 10, 2), date(2026, 10, 3)
+    conn.execute("INSERT INTO holidays(day,name,created_at) VALUES('2026-10-02','Gandhi Jayanthi','x')")
+    _, bc, kc = _day(conn, tmp_path, 1, tue, 100000, [_upi("626900001234", "ANU", 500)],
+                     [dict(vno=1, name="ANU", loan_ac="01", instr="1234", receipt=500)])
+    # Gandhi Jayanthi: one UPI arrives; someone later posts a voucher dated that day for a different payer
+    r2, bc, kc = _day(conn, tmp_path, 2, fri, bc, [_upi("626900002222", "BINDU RAJ", 600)],
+                      [dict(vno=7, name="GEETHA", loan_ac="09", instr="9999", receipt=300)], book_op=kc,
+                      acknowledged=True, ack_reason="Gap over 30-09 and 01-10, no transactions")
+    fl = {f["code"]: f for f in flags(conn, r2)}
+    assert fl["BOOK_ENTRY_ON_HOLIDAY"]["severity"] == "high" and "Gandhi Jayanthi" in fl["BOOK_ENTRY_ON_HOLIDAY"]["title"]
+    assert "HOLIDAY_RECEIPTS_PENDING" in fl          # listed holiday even though the book has an entry
+    r3, _, _ = _day(conn, tmp_path, 3, sat, bc, [_upi("626900003333", "CAROL", 100)],
+                    [dict(vno=8, name="CAROL", loan_ac="10", instr="3333", receipt=100)], book_op=kc)
+    fl = {f["code"]: f for f in flags(conn, r3)}
+    assert fl["HOLIDAY_RECEIPT_NOT_BOOKED"]["severity"] == "critical"
+    assert "Gandhi Jayanthi" in fl["HOLIDAY_RECEIPT_NOT_BOOKED"]["detail"]
+
+
+def test_holidays_page(conn):
+    import re
+    from fastapi.testclient import TestClient
+    from app.main import app, _parse_holiday_lines
+    good, bad = _parse_holiday_lines("02-10-2026 Gandhi Jayanthi\n2026-12-25, Christmas\n2 Oct 2027 GJ\nnonsense line")
+    assert [g[0].isoformat() for g in good] == ["2026-10-02", "2026-12-25", "2027-10-02"]
+    assert good[0][1] == "Gandhi Jayanthi" and good[1][1] == "Christmas" and bad == ["nonsense line"]
+    c = TestClient(app, follow_redirects=False)
+    tok = re.search(r'name="csrf_token" value="([^"]+)"', c.get("/setup").text).group(1)
+    c.post("/setup", data={"username": "kev", "password": "abcdefghijk1", "password2": "abcdefghijk1", "csrf_token": tok})
+    tok = re.search(r'name="csrf_token" value="([^"]+)"', c.get("/holidays").text).group(1)
+    assert c.post("/holidays", data={"lines": "25-12-2026 Christmas", "csrf_token": tok}).status_code == 303
+    page = c.get("/holidays").text
+    assert "<td>Christmas</td>" in page
+    c.post("/holidays/delete", data={"day": "2026-12-25", "csrf_token": tok})
+    assert "<td>Christmas</td>" not in c.get("/holidays").text
+    assert TestClient(app, follow_redirects=False).get("/holidays").status_code == 303

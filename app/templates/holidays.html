@@ -1,0 +1,51 @@
+{% extends "base.html" %}
+{% block title %}Holidays · Bank Reco{% endblock %}
+{% block content %}
+<div class="pagehead"><div><h1>Bank holidays</h1>
+  <div class="muted">Days the branches are closed, in addition to Sundays. Applies to every account.</div></div></div>
+
+<div class="panel small muted" style="margin-bottom:14px">
+  On a holiday, money that reaches the bank is held for the <strong>next working day's</strong> bank book. If it isn't
+  booked then, it is flagged <strong>Critical</strong> with the holiday date. Bank book entries dated on a holiday
+  (or a Sunday) are flagged <strong>High</strong> as probably back-dated. A day with no bank book entries is treated as a
+  holiday even if it isn't listed here. Adding it here also names it and enables the back-dating check.
+</div>
+
+<details class="panel" {{ 'open' if not rows }}>
+  <summary>Add holidays</summary>
+  <form method="post" action="{{ base }}/holidays" style="margin-top:12px">
+    <input type="hidden" name="csrf_token" value="{{ csrf }}">
+    <div class="field">
+      <label>One holiday per line: date, then name</label>
+      <textarea name="lines" rows="8" style="width:100%;font-family:inherit" placeholder="02-10-2026 Gandhi Jayanthi&#10;20-10-2026 Maha Navami&#10;25-12-2026 Christmas" required></textarea>
+      <div class="hint">You can paste the whole year's list from the RBI / bank holiday calendar for Kerala. Dates as 02-10-2026, 02/10/2026, 2026-10-02 or 2 Oct 2026. Re-adding a date updates its name.</div>
+    </div>
+    <button class="btn primary">Save holidays</button>
+  </form>
+</details>
+
+<div class="panel tight">
+{% if not rows %}<div class="empty">No bank holidays listed yet. Sundays are always treated as holidays.</div>{% else %}
+<table>
+  <thead><tr><th>Date</th><th>Day</th><th>Holiday</th><th>Added by</th><th></th></tr></thead>
+  <tbody>
+  {% for r in rows %}
+  <tr class="{{ 'faint' if r.date < today }}">
+    <td class="nowrap mono">{{ r.date.strftime('%d-%m-%Y') }}</td>
+    <td>{{ r.date.strftime('%A') }}{% if r.date.weekday() == 6 %} <span class="pill neutral">already a Sunday</span>{% endif %}</td>
+    <td>{{ r.name or '—' }}</td>
+    <td class="small muted">{{ r.created_by }} · {{ r.created_at }}</td>
+    <td class="num">
+      <form method="post" action="{{ base }}/holidays/delete" style="display:inline">
+        <input type="hidden" name="csrf_token" value="{{ csrf }}">
+        <input type="hidden" name="day" value="{{ r.day }}">
+        <button class="btn small danger">Remove</button>
+      </form>
+    </td>
+  </tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% endif %}
+</div>
+{% endblock %}

@@ -419,8 +419,17 @@ class Matcher:
 SEV_ORDER = {"critical": 0, "high": 1, "medium": 2, "info": 3}
 
 
-def day_label(d, holidays=()) -> str:
-    return f"{d:%a %d-%m-%Y}" + (" (Sunday)" if d.weekday() == 6 else " (holiday)" if d in holidays else "")
+def _day_label(d, holidays=(), names=None) -> str:
+    names = names or {}
+    if d.weekday() == 6:
+        tag = " (Sunday)"
+    elif d in names:
+        tag = f" ({names[d] or 'bank holiday'})"
+    elif d in holidays:
+        tag = " (holiday)"
+    else:
+        tag = ""
+    return f"{d:%a %d-%m-%Y}{tag}"
 
 
 def next_working_day(d, as_of, holidays):
@@ -438,8 +447,12 @@ def working_days_between(d, as_of, holidays) -> int:
 
 
 def build_flags(bank: list[dict], book: list[dict], matches: list[dict], account_type: str,
-                as_of, aged_days: int = 3, holidays=frozenset()) -> list[dict]:
+                as_of, aged_days: int = 3, holidays=frozenset(), holiday_names=None) -> list[dict]:
     from .parsers import inr
+    names = dict(holiday_names or {})
+
+    def day_label(d, holidays=()):          # noqa: F811 — adds the bank holiday's name
+        return _day_label(d, holidays, names)
 
     flags: list[dict] = []
     matched = {k for m in matches for k in (*m["bank"], *m["book"])}
@@ -540,18 +553,21 @@ def build_flags(bank: list[dict], book: list[dict], matches: list[dict], account
           + ". Usually a relative paying for the borrower. Spot-check in the Collections tab → 'Only items to verify'.",
           [x for m, _ in soft_in for x in (*m["bank"], *m["book"])])
 
-    # entries dated on a Sunday: branches are closed, so they were most likely back-dated on Monday
-    on_sunday = defaultdict(list)
+    # entries dated on a Sunday or a listed bank holiday: branches are closed, so they were most likely back-dated
+    closed = defaultdict(list)
     for k in book:
-        if not k.get("carried") and k["date"].weekday() == 6:
-            on_sunday[k["date"]].append(k)
-    for d, ks in sorted(on_sunday.items()):
+        if not k.get("carried") and (k["date"].weekday() == 6 or k["date"] in names):
+            closed[k["date"]].append(k)
+    for d, ks in sorted(closed.items()):
         rc = sum(k["amount"] for k in ks if k["dir"] == "in")
         pm = sum(k["amount"] for k in ks if k["dir"] == "out")
-        f("high", "BOOK_ENTRY_ON_SUNDAY", f"{len(ks)} bank book entr(ies) dated {d:%a %d-%m-%Y} (Sunday)",
-          f"Branches are closed on Sundays, so these were probably posted later and back-dated. Receipts "
-          f"₹{inr(rc)}, payments ₹{inr(pm)}: " + ", ".join(f"Vchr {k['vno']} {k['name']}" for k in ks[:8])
-          + ". Check who posted them and when.", [k["key"] for k in ks])
+        sunday = d.weekday() == 6
+        f("high", "BOOK_ENTRY_ON_SUNDAY" if sunday else "BOOK_ENTRY_ON_HOLIDAY",
+          f"{len(ks)} bank book entr(ies) dated {day_label(d, holidays)}",
+          f"Branches are closed on {'Sundays' if sunday else 'bank holidays'}, so these were probably posted later "
+          f"and back-dated. Receipts ₹{inr(rc)}, payments ₹{inr(pm)}: "
+          + ", ".join(f"Vchr {k['vno']} {k['name']}" for k in ks[:8]) + ". Check who posted them and when.",
+          [k["key"] for k in ks])
 
     # how receipts that arrived on a holiday were booked: the ERP instrument date should be the bank date
     hol_in = []

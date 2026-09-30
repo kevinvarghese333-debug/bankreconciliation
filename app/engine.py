@@ -95,11 +95,16 @@ def net_open(items: list[dict]) -> float:
     return round(t, 2)
 
 
+def listed_holidays(conn) -> dict:
+    """Public bank holidays entered on the Holidays page: {date: name}."""
+    return {date.fromisoformat(r["day"]): r["name"] for r in conn.execute("SELECT day, name FROM holidays")}
+
+
 def holiday_dates(conn, account_id: int, upto_run: int) -> set:
     """Days the branches were closed, for every date reconciled up to `upto_run`.
 
-    A day is a holiday when it is a Sunday, or when the ERP bank book has no entries dated that day
-    (public bank holidays). Money that reaches the bank on a holiday is booked on the next working day,
+    A day is a holiday when it is a Sunday, a bank holiday on the Holidays list, or a day on which the ERP
+    bank book has no entries. Money that reaches the bank on a holiday is booked on the next working day,
     so it is held open until that day's bank book has been reconciled.
     """
     covered = set()
@@ -111,7 +116,19 @@ def holiday_dates(conn, account_id: int, upto_run: int) -> set:
             d += timedelta(days=1)
     booked = {date.fromisoformat(r["date"]) for r in conn.execute(
         "SELECT DISTINCT date FROM items WHERE account_id=? AND side='book' AND run_id<=?", (account_id, upto_run))}
-    return {d for d in covered if d.weekday() == 6 or d not in booked}
+    listed = listed_holidays(conn)
+    return {d for d in covered if d.weekday() == 6 or d not in booked or d in listed}
+
+
+def refresh_latest_runs(conn) -> int:
+    """Recompute flags/BRS of each account's latest run (after the holiday list changes)."""
+    n = 0
+    for a in conn.execute("SELECT id FROM accounts").fetchall():
+        last = latest_run(conn, a["id"])
+        if last:
+            refresh_run(conn, last["id"])
+            n += 1
+    return n
 
 
 def latest_run(conn, account_id: int):
@@ -390,7 +407,8 @@ def refresh_run(conn, run_id: int) -> None:
     book_u = [i for i in universe if i["side"] == "book"]
     as_of = date.fromisoformat(run["period_to"])
     holidays = holiday_dates(conn, run["account_id"], run_id)
-    flags = build_flags(bank_u, book_u, mlist, acc["kind"], as_of, aged_days=AGED_DAYS, holidays=holidays)
+    flags = build_flags(bank_u, book_u, mlist, acc["kind"], as_of, aged_days=AGED_DAYS, holidays=holidays,
+                        holiday_names=listed_holidays(conn))
     flags = history_flags(conn, run, [i for i in items if i["run_id"] == run_id]) + flags
     brs = compute_brs(run["book_close"], run["bank_close"],
                       [o for o in open_now if o["side"] == "bank"],

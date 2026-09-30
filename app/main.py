@@ -696,6 +696,88 @@ def history(request: Request):
     return render(request, "history.html", runs=runs, accounts=accs, sel=int(sel) if sel and sel.isdigit() else None)
 
 
+# ---------------------------------------------------------------------------- bank holidays
+
+def _parse_holiday_lines(text: str):
+    """Lines like '02-10-2026 Gandhi Jayanthi', '2026-10-02, Gandhi Jayanthi' or '02/10/2026'."""
+    from .parsers import to_date
+    good, bad = [], []
+    for line in text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        parts = re.split(r"[,\t]+|\s+", line, maxsplit=1)
+        d = to_date(parts[0].strip())
+        if d is None and len(line.split()) >= 3:          # "2 Oct 2026 Gandhi Jayanthi"
+            d = to_date(" ".join(line.split()[:3]))
+            parts = [" ".join(line.split()[:3]), " ".join(line.split()[3:])]
+        if d is None or not (2020 <= d.year <= 2100):
+            bad.append(line)
+            continue
+        good.append((d, (parts[1] if len(parts) > 1 else "").strip(" ,-\t")[:80]))
+    return good, bad
+
+
+@app.get("/holidays", response_class=HTMLResponse)
+def holidays_page(request: Request):
+    if (g := guard(request)):
+        return g
+    c = conn()
+    try:
+        rows = [dict(r) for r in c.execute("SELECT * FROM holidays ORDER BY day DESC")]
+    finally:
+        c.close()
+    for r in rows:
+        r["date"] = date.fromisoformat(r["day"])
+    return render(request, "holidays.html", rows=rows, today=date.today())
+
+
+@app.post("/holidays")
+def holidays_add(request: Request, lines: str = Form(""), csrf_token: str = Form("")):
+    if (g := guard(request)):
+        return g
+    if not check_csrf(request, csrf_token):
+        return redirect("/holidays", ("error", "Session expired, try again."), request)
+    good, bad = _parse_holiday_lines(lines)
+    if not good:
+        return redirect("/holidays", ("error", "No dates found. Write one holiday per line, e.g. 02-10-2026 Gandhi Jayanthi."
+                                      + (f" Could not read: {'; '.join(bad[:5])}" if bad else "")), request)
+    c = conn()
+    try:
+        with db.tx(c):
+            for d, name in good:
+                c.execute("INSERT INTO holidays(day, name, created_at, created_by) VALUES (?,?,?,?) "
+                          "ON CONFLICT(day) DO UPDATE SET name=excluded.name",
+                          (d.isoformat(), name, db.now(), user(request)))
+            db.audit(c, user(request), "holidays_added", "; ".join(f"{d:%d-%m-%Y} {n}".strip() for d, n in good))
+            engine.refresh_latest_runs(c)
+    finally:
+        c.close()
+    msg = f"{len(good)} holiday(s) saved."
+    if bad:
+        msg += f" Skipped {len(bad)} line(s) that had no readable date: {'; '.join(bad[:5])}"
+    return redirect("/holidays", ("ok" if not bad else "error", msg), request)
+
+
+@app.post("/holidays/delete")
+def holidays_delete(request: Request, day: str = Form(...), csrf_token: str = Form("")):
+    if (g := guard(request)):
+        return g
+    if not check_csrf(request, csrf_token):
+        return redirect("/holidays", ("error", "Session expired, try again."), request)
+    c = conn()
+    try:
+        with db.tx(c):
+            row = c.execute("SELECT * FROM holidays WHERE day=?", (day,)).fetchone()
+            if row:
+                c.execute("DELETE FROM holidays WHERE day=?", (day,))
+                db.audit(c, user(request), "holiday_removed", f"{row['day']} {row['name']}")
+                engine.refresh_latest_runs(c)
+    finally:
+        c.close()
+    return redirect("/holidays", ("ok", "Holiday removed."), request)
+
+
 @app.get("/audit", response_class=HTMLResponse)
 def audit_page(request: Request):
     if (g := guard(request)):

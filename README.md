@@ -81,12 +81,14 @@ on the BRS and stored in the audit log.
 Branches are closed on Sundays and public bank holidays, but UPI money still reaches the bank. Reconcile those
 days like any other: upload the bank statement and that day's ERP bank book (downloading it on Monday is fine).
 
-- **What counts as a holiday:** every Sunday, plus any day whose bank book has no entries.
+- **What counts as a holiday:** every Sunday, any day on the **Holidays** page (paste the year's bank holidays,
+  one per line: `02-10-2026 Gandhi Jayanthi`), and any day whose bank book has no entries.
 - **On the holiday:** money received is shown as *"waiting for the next working day's bank book"* (Info), and as a
   memo line under C in the BRS. Money that left the account is flagged High.
 - **Next working day:** holiday items are matched against that day's bank book, including pooling with that
   day's receipts. Anything still missing becomes **Critical**, stating the date the fund reached the account.
-- **Sunday entries:** book entries dated on a Sunday are flagged High, because they were probably back-dated.
+- **Entries on closed days:** book entries dated on a Sunday or a listed holiday are flagged High, because they
+  were probably back-dated.
 - **Instrument date:** for holiday receipts booked later, the app reports whether the ERP instrument date
   (`Dt.:` in Instrument.Det) matches the date the bank received the money.
 - **Ageing:** "open 3+ days" counts working days only.
