@@ -104,6 +104,17 @@ CREATE TABLE IF NOT EXISTS revoked_runs (
     batch TEXT NOT NULL,
     snapshot_json TEXT
 );
+CREATE TABLE IF NOT EXISTS reviews (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    account_id INTEGER NOT NULL,
+    run_id INTEGER NOT NULL,
+    subject TEXT NOT NULL,
+    status TEXT NOT NULL,
+    remark TEXT NOT NULL DEFAULT '',
+    username TEXT NOT NULL,
+    at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS ix_reviews_subject ON reviews(account_id, subject, id);
 CREATE TABLE IF NOT EXISTS settings (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL

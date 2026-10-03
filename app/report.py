@@ -58,6 +58,13 @@ def _put(ws, row, values, amount_cols=(), date_cols=(), fill=None):
         cell.alignment = Alignment(vertical="top", wrap_text=c not in amount_cols and c not in date_cols)
 
 
+def _review_text(flag) -> str:
+    rv = (flag or {}).get("review")
+    if not rv:
+        return ""
+    return f"{rv['label']} — {rv['username']} {rv['at'][:16]}" + (f": {rv['remark']}" if rv.get("remark") else "")
+
+
 def build_report(conn, run_id: int) -> tuple[bytes, str]:
     run = conn.execute("SELECT * FROM runs WHERE id=?", (run_id,)).fetchone()
     acc = conn.execute("SELECT * FROM accounts WHERE id=?", (run["account_id"],)).fetchone()
@@ -89,22 +96,35 @@ def build_report(conn, run_id: int) -> tuple[bytes, str]:
     wo = wb.active
     wo.title = "Open Items"
     wo["A1"], wo["A1"].font = f"Open (unreconciled) items as at {as_of:%d-%m-%Y} — {title_acc}", FB
-    from .engine import holiday_dates
+    from .engine import holiday_dates, attach_reviews
     hols = holiday_dates(conn, run["account_id"], run_id)
+    attach_reviews(conn, run, flags)
+    sev_rank = {"critical": 0, "high": 1, "medium": 2, "info": 3}
+    worst: dict[str, dict] = {}
+    for fl in flags:
+        for k in fl.get("keys") or []:
+            if k not in worst or sev_rank[fl["severity"]] < sev_rank[worst[k]["severity"]]:
+                worst[k] = fl
     r = _table(wo, 3, ["Category", "Side", "Date", "Days open", "Vchr / Sl", "Name", "Details", "Amount",
-                       "Carried from run", "Note", "Holiday"], [46, 7, 12, 10, 12, 28, 60, 16, 12, 30, 34])
+                       "Carried from run", "Note", "Holiday", "Exception level", "Exception", "Review"],
+               [46, 7, 12, 10, 12, 28, 60, 16, 12, 30, 34, 14, 46, 40])
     first = r
     for it in sorted(open_, key=lambda i: (CAT[(i["side"], i["dir"])], i["date"])):
         _put(wo, r, [CAT[(it["side"], it["dir"])], it["side"].title(), it["date"], (as_of - it["date"]).days,
                      it.get("vno") or it.get("sl", ""), it["name"],
                      it.get("narration") or it.get("text", ""), it["amount"],
                      f"#{it['run_id']}" if it["run_id"] != run_id else "", it.get("note", ""),
-                     (f"Holiday: received {it['date']:%a %d-%m-%Y}" if it["side"] == "bank" and it["date"] in hols else "")],
+                     (f"Holiday: received {it['date']:%a %d-%m-%Y}" if it["side"] == "bank" and it["date"] in hols else ""),
+                     (worst[it["key"]]["severity"].upper() if it["key"] in worst else ""),
+                     (worst[it["key"]]["title"] if it["key"] in worst else ""),
+                     _review_text(worst.get(it["key"]))],
              amount_cols=(8,), date_cols=(3,))
+        if it["key"] in worst:
+            wo.cell(row=r, column=12).fill = PatternFill("solid", fgColor=SEV_FILL[worst[it["key"]]["severity"]])
         r += 1
     last = max(r - 1, first)
     if not open_:
-        _put(wo, r, ["No open items — every line is matched."] + [""] * 10)
+        _put(wo, r, ["No open items — every line is matched."] + [""] * 13)
         last = r
     cat_rng = f"'Open Items'!$A${first}:$A${last}"
     amt_rng = f"'Open Items'!$H${first}:$H${last}"
@@ -204,9 +224,12 @@ def build_report(conn, run_id: int) -> tuple[bytes, str]:
 
     # ------------------------------------------------------------------ Exceptions
     wx = wb.create_sheet("Exceptions", 2)
-    r = _table(wx, 1, ["Severity", "Type", "Title", "Detail"], [11, 26, 55, 110])
+    r = _table(wx, 1, ["Severity", "Type", "Title", "Detail", "Review status", "Review remark", "Reviewed by", "Reviewed at"],
+               [11, 26, 55, 110, 18, 50, 16, 20])
     for f in flags:
-        _put(wx, r, [f["severity"].upper(), f["code"], f["title"], f["detail"]], fill=SEV_FILL[f["severity"]])
+        rv = f.get("review") or {}
+        _put(wx, r, [f["severity"].upper(), f["code"], f["title"], f["detail"], rv.get("label", "Not reviewed"),
+                     rv.get("remark", ""), rv.get("username", ""), rv.get("at", "")], fill=SEV_FILL[f["severity"]])
         r += 1
     if not flags:
         _put(wx, r, ["", "", "No exceptions.", ""])

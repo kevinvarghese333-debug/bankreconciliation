@@ -21,13 +21,29 @@
     if (saved) { const t = $(`.tab[data-tab="${saved}"]`, bar); if (t) t.click(); }
   });
 
-  // exception severity chips
-  $$('.chips[data-filter="flags"]').forEach((chips) => {
-    $$(".chip", chips).forEach((c) => c.addEventListener("click", () => {
-      $$(".chip", chips).forEach((x) => x.classList.toggle("on", x === c));
-      $$("#flags .flag").forEach((f) => { f.style.display = c.dataset.sev === "all" || f.dataset.sev === c.dataset.sev ? "" : "none"; });
+  // exceptions: severity / unreviewed chips + search, combined
+  const flagBox = $("#flags");
+  if (flagBox) {
+    let sev = "all", q = "";
+    const norm = (t) => t.toLowerCase().replace(/[,₹]/g, "");
+    const apply = () => {
+      let shown = 0;
+      $$(".flag", flagBox).forEach((f) => {
+        const okSev = sev === "all" || (sev === "unreviewed" ? f.dataset.reviewed === "0" : f.dataset.sev === sev);
+        const okQ = !q || norm(f.textContent).includes(q);
+        f.style.display = okSev && okQ ? "" : "none";
+        if (okSev && okQ) shown++;
+      });
+      const none = $("#flags-none");
+      if (none) none.style.display = shown || !$$(".flag", flagBox).length ? "none" : "";
+    };
+    $$('.chips[data-filter="flags"] .chip').forEach((c) => c.addEventListener("click", () => {
+      $$('.chips[data-filter="flags"] .chip').forEach((x) => x.classList.toggle("on", x === c));
+      sev = c.dataset.sev; apply();
     }));
-  });
+    const fs = $("#flagsearch");
+    if (fs) fs.addEventListener("input", () => { q = norm(fs.value.trim()); apply(); });
+  }
 
   // table search + "only review" toggle
   function applyFilter(table) {

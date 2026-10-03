@@ -88,15 +88,44 @@ _GENERIC = {"BRANCH", "NORTH", "SOUTH", "EAST", "WEST", "ROAD", "JUNCTION", "KAV
             "ACCOUNT", "COLLECTION", "SWEEP", "RECEIVED", "BANK", "SOUTH", "INDIAN", "INTER"}
 
 
-def branch_score(branch: str, hay: str) -> float:
-    """Best match of any distinctive place-name word of `branch` against the words of `hay`
-    (KALADY~KALADI, AZHIKODE~AZHICODE); multi-word names must also agree on their other words when present."""
+def _abbrev_score(w: str, h: str) -> float:
+    """`h` is a shortened form of `w` (or the reverse): KANICHU ~ KANICHUKULANGARA. At least 5 letters,
+    and the overlapping part must agree (one typo tolerated in longer stems)."""
+    short, long_ = (h, w) if len(h) <= len(w) else (w, h)
+    if len(short) < 5 or len(short) == len(long_):
+        return 0.0
+    head = long_[:len(short)]
+    if head == short or (len(short) >= 7 and fuzz.ratio(head, short) >= 85):
+        return 88.0
+    return 0.0
+
+
+def branch_score(branch: str, hay: str, known: tuple = ()) -> float:
+    """Best match of any distinctive place-name word of `branch` against the words of `hay`.
+
+    Tolerates spelling variants (KALADY~KALADI, AZHIKODE~AZHICODE), a name split or joined
+    (KANICHU KULANGARA ~ KANICHUKULANGARA) and a shortened name (KANICHU ~ KANICHUKULANGARA).
+    A shortened name only counts when it fits no other branch in `known`."""
     words = [w for w in branch.split() if len(w) >= 4 and w not in _GENERIC]
-    hw = [w for w in hay.split() if len(w) >= 4]
+    raw = hay.split()
+    hw = [w for w in raw if len(w) >= 4]
+    hw += [a + b for a, b in zip(raw, raw[1:]) if len(a) >= 3 and len(b) >= 3]   # split names
+    if len(words) >= 2:
+        words.append("".join(words))                                               # joined names
     if not words or not hw:
         return 0.0
-    best = [max(fuzz.ratio(w, h) for h in hw) for w in words]
-    return float(max(best))
+    others = [o for o in known if o and o not in words]
+    best = 0.0
+    for w in words:
+        for h in hw:
+            sc = fuzz.ratio(w, h)
+            if sc < 80:
+                ab = _abbrev_score(w, h)
+                if ab and len(h) < len(w) and any(_abbrev_score(o, h) or o == h for o in others):
+                    ab = 0.0      # "KANI" could be more than one branch: not evidence
+                sc = max(sc, ab)
+            best = max(best, sc)
+    return float(best)
 
 
 def same_amount(a: float, b: float) -> bool:
@@ -148,8 +177,9 @@ def find_subset(target: float, items: list[dict], max_size: int = 6, max_items: 
 
 class Matcher:
     def __init__(self, bank: list[dict], book: list[dict], window_days: int = 7,
-                 pool_collections: bool = True, holidays=frozenset()):
+                 pool_collections: bool = True, holidays=frozenset(), branches=()):
         self.holidays = holidays
+        self.branches = tuple(branches)
         self.bank = bank
         self.book = book
         self.window = window_days
@@ -225,6 +255,8 @@ class Matcher:
             if direction == "in":
                 self.utr_l4_passes()
             self.pair_pass(direction, lambda b, k: strong_name(b["name"], k["name"]), "Amount + name", "strong")
+            if direction == "out":
+                self.renewal_pass()
             self.group_passes(direction)
             floor = PARTIAL if direction == "out" else PARTIAL_IN
             self.pair_pass(direction,
@@ -293,6 +325,11 @@ class Matcher:
         name appears in the ERP entry (branch column, narration or notes). Spelling variants
         (KALADY/Kaladi, AZHIKODE/Azhicode) are tolerated."""
         banks = [b for b in self.free(self.bank, direction) if b.get("channel") in ("SWEEP", "IB", "CASH")]
+        known = {w for name in (*self.branches, *(x.get("branch") or "" for x in self.bank))
+                 for w in clean_name(name).split() if len(w) >= 4 and w not in _GENERIC}
+        known |= {"".join(w for w in clean_name(n).split() if w not in _GENERIC)
+                  for n in (*self.branches, *(x.get("branch") or "" for x in self.bank)) if n}
+        known = tuple(sorted(known))
         for b in banks:
             br = clean_name(b.get("branch") or b.get("name"))
             if not br:
@@ -302,7 +339,7 @@ class Matcher:
                 if not same_amount(b["amount"], k["amount"]) or not self.ok_dates(b, k):
                     continue
                 hay = clean_name(" ".join([k.get("branch", ""), k.get("text", ""), k.get("name", "")]))
-                sc = branch_score(br, hay)
+                sc = branch_score(br, hay, known)
                 if sc >= 80:
                     cands.append((sc, k))
             if cands:
@@ -392,6 +429,49 @@ class Matcher:
             if sub:
                 self.add(sub, [k], "Several bank lines = one book entry (same name)", "review",
                          f"{len(sub)} bank lines from '{k['name']}' add up to this book entry")
+
+    def renewal_pass(self):
+        """Loan renewal settled net: the bank pays only (new loan − closure of the old loan), while the
+        bank book carries the new disbursal in full and a receipt closing the old loan.
+
+        bank debit = book payment (new loan) − book receipt(s) (old loan closed), when
+          * same day,
+          * the bank beneficiary is the same person as the new loan (strong name rule),
+          * the closing receipt carries exactly the same customer name as the new loan,
+          * the loan accounts differ, and
+          * the receipt is not a real bank credit (its UPI ref is not on any bank credit).
+        Always 'review', so a person confirms it."""
+        bank_in_l4 = {(x.get("ref") or "")[-4:] for x in self.bank if x["dir"] == "in" and x.get("ref")}
+        squash = lambda n: clean_name(n).replace(" ", "")
+        for b in sorted(self.free(self.bank, "out"), key=lambda x: -x["amount"]):
+            if not b.get("name") or b["key"] in self.used:
+                continue
+            found = []
+            for p in self.free(self.book, "out"):
+                if (p["date"] != b["date"] or p["amount"] <= b["amount"] + TOL or not p.get("name")
+                        or not strong_name(b["name"], p["name"])):
+                    continue
+                closes = [r for r in self.free(self.book, "in")
+                          if r["date"] == p["date"] and r.get("name") and squash(r["name"]) == squash(p["name"])
+                          and not (p.get("loan_ac") and r.get("loan_ac") == p["loan_ac"])
+                          and not (r.get("l4") and r["l4"] in bank_in_l4)]
+                target = round(p["amount"] - b["amount"], 2)
+                one = [r for r in closes if same_amount(r["amount"], target)]
+                sub = [one[0]] if one else find_subset(target, closes, max_size=3)
+                if sub:
+                    found.append((p, sub, len(one) > 1))
+            if not found:
+                continue
+            p, sub, dup = found[0]
+            ambiguous = len(found) > 1 or dup
+            from .parsers import inr
+            parts = " + ".join(f"₹{inr(r['amount'])} (Vchr {r['vno']}" + (f", loan {r['loan_ac']}" if r.get("loan_ac") else "")
+                               + ")" for r in sub)
+            note = (f"Bank paid ₹{inr(b['amount'])} = new loan ₹{inr(p['amount'])} (Vchr {p['vno']}"
+                    + (f", loan {p['loan_ac']}" if p.get("loan_ac") else "") + f") − old loan closed {parts}")
+            if ambiguous:
+                note += " — more than one combination fits; confirm the right one"
+            self.add([b], [p, *sub], "Renewal — net settled" + (" (ambiguous)" if ambiguous else ""), "review", note)
 
     def unique_amount_pass(self, direction):
         """Only one bank and one book line left with this amount (within the date window)."""
@@ -527,6 +607,12 @@ def build_flags(bank: list[dict], book: list[dict], matches: list[dict], account
             continue
         direction = items[0]["dir"]
         amt = sum(byk[x]["amount"] for x in m["bank"] if x in byk)
+        if m["method"].startswith("Renewal"):
+            f("high" if "(ambiguous)" in m["method"] else "medium", "RENEWAL_NETTED",
+              "Loan renewal settled net — verify",
+              f"{m['note']}. Confirm the old loan was closed and the new loan paid the balance.",
+              [*m["bank"], *m["book"]])
+            continue
         if m["method"].startswith("Collections pooled"):
             f("medium", "POOLED_COLLECTIONS", "Collections agree only on the day total",
               f"₹{inr(amt)} · {m['note']}. Open the Collections tab to review them.",

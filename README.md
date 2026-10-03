@@ -113,6 +113,28 @@ The first login created at setup is an **Admin**. The Admin portal is at **/bank
 - **Sign-off (maker–checker):** a Manager or Admin marks a run "Checked". They cannot check their own run. The
   names print on the Excel BRS.
 
+### Reviewing exceptions
+
+Every exception on a run has a **Review** box (Operator and above). Pick *Verified — OK*, *Corrected* or *Needs
+follow-up*, and write what was checked. Corrected and follow-up need a remark. The review is saved with the name
+and time, and stays attached while the item is carried to later days. It shows in the app, on the Excel
+Exceptions sheet, and against each line on the Open Items sheet, which also shows each item's exception level.
+The Exceptions panel has a search box (name, amount, reference, voucher) and an *Unreviewed* filter.
+
+### Loan renewals settled net
+
+When a loan is renewed, the bank pays only the difference while the bank book shows the new loan in full and a
+receipt closing the old loan. The app matches *bank debit = new loan − closure receipt(s)* when:
+- the entries are on the same day;
+- the customer name on the closure is exactly the same as on the new loan;
+- the loan accounts differ;
+- the closure is not a real UPI credit.
+
+It is marked *Renewal — net settled* and flagged Medium to verify, or High if more than one combination fits.
+
+Branch names are matched even when shortened or split (Kanichu / Kanichu Kulangara = Kanichukulangara), but only
+when the short form fits one branch alone.
+
 ## 5. How matching works
 
 Amounts must agree to the paisa. Debits only match payments, and credits only match receipts.

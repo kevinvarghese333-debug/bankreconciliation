@@ -131,6 +131,56 @@ def refresh_latest_runs(conn) -> int:
     return n
 
 
+REVIEW_STATUS = {
+    "ok": "Verified — OK",
+    "corrected": "Corrected",
+    "followup": "Needs follow-up",
+}
+
+
+def flag_subject(flag: dict, run_id: int) -> str:
+    """Stable id for an exception: the same open items give the same id on later days,
+    so a review recorded once stays attached while the item is carried forward."""
+    keys = ",".join(sorted(flag.get("keys") or [], key=lambda k: int(k) if str(k).isdigit() else 0))
+    return f"{flag['code']}|{keys or 'run' + str(run_id)}"
+
+
+def latest_reviews(conn, account_id: int) -> dict:
+    """{subject: latest review row} for an account."""
+    out = {}
+    for r in conn.execute("SELECT * FROM reviews WHERE account_id=? ORDER BY id", (account_id,)):
+        out[r["subject"]] = dict(r)
+    return out
+
+
+def attach_reviews(conn, run, flags: list[dict]) -> list[dict]:
+    revs = latest_reviews(conn, run["account_id"])
+    for f in flags:
+        f["subject"] = flag_subject(f, run["id"])
+        rv = revs.get(f["subject"])
+        if rv:
+            rv = dict(rv, label=REVIEW_STATUS.get(rv["status"], rv["status"]))
+        f["review"] = rv
+    return flags
+
+
+def save_review(conn, run_id: int, subject: str, status: str, remark: str, user: str) -> None:
+    run = conn.execute("SELECT * FROM runs WHERE id=?", (run_id,)).fetchone()
+    if not run:
+        raise ValueError("Run not found.")
+    if status not in REVIEW_STATUS:
+        raise ValueError("Pick a review status.")
+    if status != "ok" and len(remark.strip()) < 5:
+        raise ValueError("Write what was corrected or what follow-up is needed.")
+    flags = json.loads(run["flags_json"] or "[]")
+    if subject not in {flag_subject(f, run_id) for f in flags}:
+        raise ValueError("That exception is no longer on this run.")
+    conn.execute("INSERT INTO reviews(account_id, run_id, subject, status, remark, username, at) VALUES (?,?,?,?,?,?,?)",
+                 (run["account_id"], run_id, subject, status, remark.strip()[:500], user, db.now()))
+    db.audit(conn, user, "exception_reviewed",
+             f"Run #{run_id} · {subject.split('|')[0]} · {REVIEW_STATUS[status]}" + (f" · {remark.strip()}" if remark.strip() else ""))
+
+
 def latest_run(conn, account_id: int):
     return conn.execute("SELECT * FROM runs WHERE account_id=? ORDER BY period_to DESC, id DESC LIMIT 1",
                         (account_id,)).fetchone()
@@ -308,8 +358,11 @@ def _reconcile(conn, account_id, bank_path, bank_name, book_path, book_name, use
 
         bank_items = [i for i in carried + new_items if i["side"] == "bank"]
         book_items = [i for i in carried + new_items if i["side"] == "book"]
+        branch_names = [n for r in conn.execute("SELECT branch, nickname FROM accounts")
+                        for n in (r["branch"], r["nickname"]) if n]
+        branch_names += [b.get("branch", "") for b in book_items if b.get("branch")]
         matches = Matcher(bank_items, book_items, window_days=WINDOW_DAYS,
-                          holidays=holiday_dates(conn, account_id, run_id)).run()
+                          holidays=holiday_dates(conn, account_id, run_id), branches=branch_names).run()
         for m in matches:
             carried_keys = [k for k in (*m["bank"], *m["book"]) if any(c["key"] == k for c in carried)]
             note = m["note"]

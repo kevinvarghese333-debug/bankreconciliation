@@ -588,6 +588,11 @@ def run_view(request: Request, run_id: int):
         c.close()
     run = dict(run)
     flags = json.loads(run["flags_json"] or "[]")
+    c = conn()
+    try:
+        engine.attach_reviews(c, run, flags)
+    finally:
+        c.close()
     for f in flags:
         f["keyset"] = ",".join(f["keys"])
     return render(request, "run.html", run=run, account=acc,
@@ -595,7 +600,7 @@ def run_view(request: Request, run_id: int):
                   brs=json.loads(run["brs_json"] or "{}"), s=json.loads(run["summary_json"] or "{}"),
                   groups=_group_matches(items, matches), open_items=open_,
                   is_latest=latest and latest["id"] == run_id,
-                  as_of=date.fromisoformat(run["period_to"]))
+                  as_of=date.fromisoformat(run["period_to"]), review_status=engine.REVIEW_STATUS)
 
 
 @app.get("/runs/{run_id}/excel")
@@ -610,6 +615,23 @@ def run_excel(request: Request, run_id: int):
         c.close()
     return Response(data, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                     headers={"Content-Disposition": f'attachment; filename="{fname}"'})
+
+
+@app.post("/runs/{run_id}/review")
+def run_review(request: Request, run_id: int, subject: str = Form(...), status: str = Form(...),
+               remark: str = Form(""), csrf_token: str = Form("")):
+    if (g := guard(request, "note")):
+        return g
+    if not check_csrf(request, csrf_token):
+        return redirect(f"/runs/{run_id}", ("error", "Session expired, try again."), request)
+    c = conn()
+    try:
+        engine.save_review(c, run_id, subject, status, remark, user(request))
+    except ValueError as e:
+        return redirect(f"/runs/{run_id}#flags", ("error", str(e)), request)
+    finally:
+        c.close()
+    return redirect(f"/runs/{run_id}#flags", ("ok", "Review saved."), request)
 
 
 @app.post("/runs/{run_id}/signoff")

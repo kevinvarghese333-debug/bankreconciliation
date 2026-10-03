@@ -620,3 +620,72 @@ def test_signoff_maker_checker(conn, tmp_path):
     conn.execute("UPDATE runs SET checked_by='', created_by='kev' WHERE id=?", (rid,))
     admin.post(f"/runs/{rid}/signoff", data={"csrf_token": t})
     assert conn.execute("SELECT checked_by FROM runs WHERE id=?", (rid,)).fetchone()[0] == ""   # can't check own run
+
+
+def test_renewal_net_settlement(conn, tmp_path):
+    d = date(2026, 9, 29)
+    rid, _, _ = _day(conn, tmp_path, 1, d, 1_000_000, [
+        ("RAP/626900000001/ 0000095001 /ANANDA PADMANABHAN/", 29500, 0),
+        ("RAP/626900000002/ 0000095002 /MINI JOSE/", 10000, 0),
+        ("UPI/SBIN/626900007777/MINI JOSE/UPI/x/p@ok", 0, 5000),
+    ], [
+        dict(vno=11, name="ANANDA PADMANABHAN", loan_ac="00110400700000000275", payment=180000),
+        dict(vno=12, name="ANANDA PADMANABHAN", loan_ac="00110400700000000261", receipt=150500),
+        # MINI's "closure" carries a real UPI ref that is on a bank credit: it is a collection, not a renewal
+        dict(vno=13, name="MINI JOSE", loan_ac="0021", payment=15000),
+        dict(vno=14, name="MINI JOSE", loan_ac="0022", instr="7777", receipt=5000),
+    ])
+    items = engine.run_items(conn, rid)
+    m_of = {i["name"] + str(i["amount"]): i["match_id"] for i in items}
+    mid = m_of["ANANDA PADMANABHAN29500.0"]
+    assert mid and m_of["ANANDA PADMANABHAN180000.0"] == mid and m_of["ANANDA PADMANABHAN150500.0"] == mid
+    row = conn.execute("SELECT method, confidence, note FROM matches WHERE id=?", (mid,)).fetchone()
+    assert row[0] == "Renewal — net settled" and row[1] == "review" and "1,50,500.00" in row[2]
+    f = [x for x in flags(conn, rid) if x["code"] == "RENEWAL_NETTED"]
+    assert len(f) == 1 and f[0]["severity"] == "medium"
+    assert m_of["MINI JOSE10000.0"] is None or m_of["MINI JOSE10000.0"] != m_of["MINI JOSE15000.0"]
+    assert brs(conn, rid)["tallies"]
+
+
+def test_short_branch_name_sweep(conn, tmp_path):
+    d = date(2026, 9, 29)
+    rid, _, _ = _day(conn, tmp_path, 1, d, 100000, [
+        ("TR FROM KANICHUKULANGARA BRANCH 58.73.1137", 0, 45000),
+    ], [dict(vno=1, name="", vtype="BR", receipt=45000, narration="Sweep received from Kanichu")])
+    it = [i for i in engine.run_items(conn, rid) if i["side"] == "bank"][0]
+    assert it["match_id"]
+
+
+def test_exception_reviews_search_and_excel(conn, tmp_path):
+    from io import BytesIO
+    import openpyxl
+    d1, d2 = date(2026, 9, 28), date(2026, 9, 29)
+    r1, bc, kc = _day(conn, tmp_path, 1, d1, 100000, [_upi("626900001111", "ASHA", 100)],
+                      [dict(vno=1, name="ASHA", loan_ac="1", instr="1111", receipt=100),
+                       dict(vno=2, name="BINDU RAJAN", loan_ac="2", payment=30000)])
+    admin = _client_setup()
+    page = admin.get(f"/runs/{r1}").text
+    assert 'id="flagsearch"' in page and "0 of" in page and "Unreviewed" in page
+    fl = [f for f in flags(conn, r1) if f["code"] == "BOOK_PAYMENT_NOT_IN_BANK"][0]
+    subject = engine.flag_subject(fl, r1)
+    t = _tok(admin, f"/runs/{r1}")
+    admin.post(f"/runs/{r1}/review", data={"subject": subject, "status": "followup", "remark": "", "csrf_token": t})
+    assert conn.execute("SELECT COUNT(*) FROM reviews").fetchone()[0] == 0          # follow-up needs a remark
+    admin.post(f"/runs/{r1}/review", data={"subject": subject, "status": "followup",
+                                           "remark": "Branch to confirm RAP status", "csrf_token": t})
+    page = admin.get(f"/runs/{r1}").text
+    assert "Needs follow-up" in page and "Branch to confirm RAP status" in page
+    # Excel: review on Exceptions sheet; level on Open Items
+    wb = openpyxl.load_workbook(BytesIO(admin.get(f"/runs/{r1}/excel").content))
+    ex = [[c.value for c in row] for row in wb["Exceptions"].iter_rows(min_row=2)]
+    assert any(r[1] == "BOOK_PAYMENT_NOT_IN_BANK" and r[4] == "Needs follow-up" and r[6] == "kev" for r in ex)
+    oi = wb["Open Items"]
+    hdr = [c.value for c in oi[3]]
+    assert hdr[11] == "Exception level"
+    rows = [[c.value for c in row] for row in oi.iter_rows(min_row=4)]
+    bindu = [r for r in rows if r[5] == "BINDU RAJAN"][0]
+    assert bindu[11] == "HIGH" and "Needs follow-up" in bindu[13]
+    # the review follows the item when it is carried to the next day
+    r2, _, _ = _day(conn, tmp_path, 2, d2, bc, [_upi("626900002222", "CIJI", 200)],
+                    [dict(vno=3, name="CIJI", loan_ac="3", instr="2222", receipt=200)], book_op=kc)
+    assert "Branch to confirm RAP status" in admin.get(f"/runs/{r2}").text

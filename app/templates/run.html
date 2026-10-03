@@ -94,22 +94,51 @@
   </div>
 
   <div class="panel tight">
+    {% set nrev = flags | selectattr("review") | list | length %}
     <div class="panelhead">
-      <h2 style="margin:0">Exceptions</h2>
+      <h2 style="margin:0">Exceptions <span class="small muted" style="font-weight:400">· {{ nrev }} of {{ flags|length }} reviewed</span></h2>
       <div class="chips noprint" data-filter="flags">
         <button class="chip on" data-sev="all">All {{ flags|length }}</button>
         {% for sv in ['critical','high','medium','info'] %}{% if s.severity[sv] %}<button class="chip" data-sev="{{ sv }}">{{ sv|capitalize }} {{ s.severity[sv] }}</button>{% endif %}{% endfor %}
+        {% if flags|length - nrev %}<button class="chip" data-sev="unreviewed">Unreviewed {{ flags|length - nrev }}</button>{% endif %}
       </div>
     </div>
-    <div class="scroll" style="max-height:430px" id="flags">
+    <div class="toolbar noprint" style="padding:8px 18px;border-bottom:1px solid var(--line)">
+      <input type="text" id="flagsearch" placeholder="Search customer name, amount, reference, voucher…" style="max-width:none;width:100%">
+    </div>
+    <div class="scroll" style="max-height:520px" id="flags">
       {% for f in flags %}
-      <div class="flag" data-sev="{{ f.severity }}">
+      <div class="flag" data-sev="{{ f.severity }}" data-reviewed="{{ '1' if f.review else '0' }}">
         <div><span class="pill {{ f.severity }}">{{ f.severity|upper }}</span></div>
-        <div><div class="t">{{ f.title }}</div><div class="d">{{ f.detail }}</div></div>
+        <div>
+          <div class="t">{{ f.title }}</div><div class="d">{{ f.detail }}</div>
+          {% if f.review %}
+          <div class="small" style="margin-top:5px">
+            <span class="pill {{ {'ok':'ok','corrected':'info','followup':'review'}[f.review.status] }}">{{ f.review.label }}</span>
+            <span class="muted">{{ f.review.username }} · {{ f.review.at }}{% if f.review.run_id != run.id %} · on run #{{ f.review.run_id }}{% endif %}</span>
+            {% if f.review.remark %}<div style="margin-top:2px">{{ f.review.remark }}</div>{% endif %}
+          </div>
+          {% endif %}
+          {% if can('note') %}
+          <details class="noprint" style="margin-top:5px">
+            <summary class="small faint">{{ 'Update review' if f.review else 'Review' }}</summary>
+            <form method="post" action="{{ base }}/runs/{{ run.id }}/review" style="display:flex;gap:6px;flex-wrap:wrap;margin-top:6px">
+              <input type="hidden" name="csrf_token" value="{{ csrf }}">
+              <input type="hidden" name="subject" value="{{ f.subject }}">
+              <select name="status" style="width:auto;padding:4px 6px;font-size:12.5px">
+                {% for k, v in review_status.items() %}<option value="{{ k }}" {{ 'selected' if f.review and f.review.status == k }}>{{ v }}</option>{% endfor %}
+              </select>
+              <input type="text" name="remark" placeholder="What did you check / correct?" style="flex:1;min-width:180px;padding:4px 7px;font-size:12.5px">
+              <button class="btn small primary">Save</button>
+            </form>
+          </details>
+          {% endif %}
+        </div>
       </div>
       {% else %}
       <div class="empty">No exceptions. Every line matched cleanly.</div>
       {% endfor %}
+      <div class="empty" id="flags-none" style="display:none">No exceptions match your search.</div>
     </div>
   </div>
 </div>
