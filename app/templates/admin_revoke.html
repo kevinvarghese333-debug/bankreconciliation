@@ -51,6 +51,22 @@
   </div>
 </div>
 
+<form class="panel" method="post" action="{{ base }}/admin/recheck">
+  <input type="hidden" name="csrf_token" value="{{ csrf }}">
+  <h2>Re-check open items with the latest matching rules</h2>
+  <p class="small muted" style="margin-top:0">Runs the newer rules (shortened or split branch names, loan renewals settled net)
+    over lines that are still open. Nothing already matched is changed, and lines someone unmatched by hand are left alone.
+    New matches are recorded on the day both lines first appeared, so earlier days show corrected exceptions. No files
+    need to be uploaded again.</p>
+  <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+    <select name="account" style="width:auto" required>
+      <option value="all">All accounts</option>
+      {% for a in accounts %}<option value="{{ a.id }}">{{ a.nickname }} (…{{ a.acc_no[-4:] }})</option>{% endfor %}
+    </select>
+    <button class="btn">Re-check</button>
+  </div>
+</form>
+
 <div class="panel tight">
   <h2 style="padding:12px 14px 0">Revoked reconciliations</h2>
   {% if not revoked %}<div class="empty">Nothing revoked yet.</div>{% else %}

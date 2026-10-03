@@ -115,6 +115,11 @@ CREATE TABLE IF NOT EXISTS reviews (
     at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS ix_reviews_subject ON reviews(account_id, subject, id);
+CREATE TABLE IF NOT EXISTS no_auto (
+    item_id INTEGER PRIMARY KEY,          -- a person unmatched this line: never auto-match it again
+    at TEXT NOT NULL,
+    username TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS settings (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL

@@ -545,6 +545,8 @@ def unmatch(conn, match_id: int, user: str, reason: str) -> None:
     if not reason.strip():
         raise ValueError("A reason is required.")
     with db.tx(conn):
+        for r in conn.execute("SELECT id FROM items WHERE match_id=?", (match_id,)).fetchall():
+            conn.execute("INSERT OR IGNORE INTO no_auto(item_id, at, username) VALUES (?,?,?)", (r["id"], db.now(), user))
         conn.execute("UPDATE items SET match_id=NULL WHERE match_id=?", (match_id,))
         conn.execute("DELETE FROM matches WHERE id=?", (match_id,))
         refresh_run(conn, last["id"])
@@ -624,3 +626,60 @@ def revoke_from(conn, account_ids: list[int], from_date: date, reason: str, user
             if prev:
                 refresh_run(conn, prev["id"])
     return runs
+
+
+def recheck_account(conn, account_id: int, user: str) -> dict:
+    """Apply newer matching rules to lines that are still open, without redoing any reconciliation.
+
+    Existing matches (automatic and manual), reviews and sign-offs are kept. Only the newer passes run
+    (branch names shortened/split, loan renewals settled net) over the account's currently open lines.
+    Each new match is recorded on the run where both sides first existed, and every run from there on is
+    recomputed, so earlier days show the corrected exceptions too. Lines a person unmatched are skipped."""
+    acc = conn.execute("SELECT * FROM accounts WHERE id=?", (account_id,)).fetchone()
+    last = latest_run(conn, account_id)
+    if not acc or not last:
+        return {"account": acc["nickname"] if acc else "?", "new_matches": 0, "methods": {}, "open_before": 0,
+                "open_after": 0}
+    with _RUN_LOCK, db.tx(conn):
+        blocked = {r["item_id"] for r in conn.execute("SELECT item_id FROM no_auto")}
+        open_ = [i for i in open_items_as_of(conn, account_id, last["id"]) if i["id"] not in blocked]
+        open_before = len(open_items_as_of(conn, account_id, last["id"]))
+        for i in open_:
+            i["carried"] = False
+        bank = [i for i in open_ if i["side"] == "bank"]
+        book = [i for i in open_ if i["side"] == "book"]
+        branch_names = [n for r in conn.execute("SELECT branch, nickname FROM accounts")
+                        for n in (r["branch"], r["nickname"]) if n]
+        branch_names += [b.get("branch", "") for b in book if b.get("branch")]
+        m = Matcher(bank, book, window_days=WINDOW_DAYS, branches=branch_names)
+        m.sweep_pass("out")
+        m.sweep_pass("in")
+        m.renewal_pass()
+        byk = {i["key"]: i for i in open_}
+        first_run = None
+        methods: dict[str, int] = defaultdict(int)
+        for mt in m.matches:
+            keys = [*mt["bank"], *mt["book"]]
+            rid = max(byk[k]["run_id"] for k in keys)
+            first_run = rid if first_run is None else min(first_run, rid)
+            cur = conn.execute(
+                "INSERT INTO matches (run_id, account_id, method, confidence, note, manual, created_at, created_by) "
+                "VALUES (?,?,?,?,?,0,?,?)",
+                (rid, account_id, mt["method"], mt["confidence"],
+                 (mt["note"] + " · " if mt["note"] else "") + "found on re-check with updated rules",
+                 db.now(), "system (re-check)"))
+            conn.execute(f"UPDATE items SET match_id=? WHERE id IN ({','.join('?' * len(keys))})",
+                         (cur.lastrowid, *[int(k) for k in keys]))
+            methods[mt["method"]] += 1
+        if first_run is not None:
+            for r in conn.execute("SELECT id FROM runs WHERE account_id=? AND id>=? ORDER BY id",
+                                  (account_id, first_run)).fetchall():
+                refresh_run(conn, r["id"])
+        open_after = len(open_items_as_of(conn, account_id, last["id"]))
+        summary = {"account": acc["nickname"], "new_matches": len(m.matches), "methods": dict(methods),
+                   "open_before": open_before, "open_after": open_after}
+        db.audit(conn, user, "recheck",
+                 f"{acc['nickname']} (…{acc['acc_no'][-4:]}): {len(m.matches)} new match(es)"
+                 + (" — " + ", ".join(f"{n} × {k}" for k, n in methods.items()) if methods else "")
+                 + f"; open items {open_before} → {open_after}")
+    return summary

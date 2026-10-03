@@ -30,6 +30,14 @@ ROOT_PATH = "/" + os.environ.get("ROOT_PATH", "").strip("/") if os.environ.get("
 db.init()
 _c = db.connect()
 auth.ensure_env_user(_c)
+# One-time (03-10-2026): apply the new branch-name and loan-renewal rules to the …113 account's open items.
+try:
+    if not db.get_setting(_c, "recheck_2026_10_03"):
+        for _a in _c.execute("SELECT id FROM accounts WHERE acc_no LIKE '%113' ORDER BY id").fetchall():
+            engine.recheck_account(_c, _a["id"], "system")
+        db.set_setting(_c, "recheck_2026_10_03", db.now())
+except Exception as _e:  # never stop the app from starting
+    print("re-check skipped:", _e)
 _c.close()
 
 app = FastAPI(title="Bank Reconciliation", docs_url=None, redoc_url=None, openapi_url=None)
@@ -1047,6 +1055,23 @@ def admin_revoke(request: Request, account: str = Form(...), from_date: str = Fo
         c.close()
     return redirect("/admin/revoke", ("ok", f"Revoked {len(runs)} reconciliation(s) from {d:%d-%m-%Y}. Those days can "
                                             "now be reconciled again, in order."), request)
+
+
+@app.post("/admin/recheck")
+def admin_recheck(request: Request, account: str = Form(...), csrf_token: str = Form("")):
+    if (g := guard(request, "admin")):
+        return g
+    if not check_csrf(request, csrf_token):
+        return redirect("/admin/revoke", ("error", "Session expired, try again."), request)
+    c = conn()
+    try:
+        out = [engine.recheck_account(c, aid, user(request)) for aid in _revoke_accounts(c, account)]
+    finally:
+        c.close()
+    n = sum(o["new_matches"] for o in out)
+    detail = "; ".join(f"{o['account']}: {o['new_matches']} new, open {o['open_before']} → {o['open_after']}"
+                       for o in out if o["new_matches"]) or "nothing new to match"
+    return redirect("/admin/revoke", ("ok", f"Re-check done — {n} new match(es). {detail}."), request)
 
 
 @app.get("/audit", response_class=HTMLResponse)

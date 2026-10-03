@@ -689,3 +689,43 @@ def test_exception_reviews_search_and_excel(conn, tmp_path):
     r2, _, _ = _day(conn, tmp_path, 2, d2, bc, [_upi("626900002222", "CIJI", 200)],
                     [dict(vno=3, name="CIJI", loan_ac="3", instr="2222", receipt=200)], book_op=kc)
     assert "Branch to confirm RAP status" in admin.get(f"/runs/{r2}").text
+
+
+def test_recheck_applies_new_rules_to_old_runs(conn, tmp_path):
+    d1, d2 = date(2026, 9, 28), date(2026, 9, 29)
+    r1, bc, kc = _day(conn, tmp_path, 1, d1, 1_000_000, [
+        ("RAP/626900000001/ 0000095001 /ANANDA PADMANABHAN/", 29500, 0),
+        ("TR FROM KANICHUKULANGARA BRANCH 58.73.1137", 0, 45000),
+        _upi("626900001111", "ASHA", 100),
+    ], [
+        dict(vno=11, name="ANANDA PADMANABHAN", loan_ac="0275", payment=180000),
+        dict(vno=12, name="ANANDA PADMANABHAN", loan_ac="0261", receipt=150500),
+        dict(vno=13, name="", vtype="BR", receipt=45000, narration="Sweep received from Kanichu"),
+        dict(vno=14, name="ASHA", loan_ac="1", instr="1111", receipt=100),
+    ])
+    r2, _, _ = _day(conn, tmp_path, 2, d2, bc, [_upi("626900002222", "BINU", 200)],
+                    [dict(vno=15, name="BINU", loan_ac="2", instr="2222", receipt=200)], book_op=kc)
+    # pretend day 1 was reconciled before the new rules existed: drop those matches
+    old = [r[0] for r in conn.execute("SELECT id FROM matches WHERE method LIKE 'Renewal%' OR method LIKE 'Sweep%'")]
+    assert len(old) == 2
+    for mid in old:
+        conn.execute("UPDATE items SET match_id=NULL WHERE match_id=?", (mid,))
+        conn.execute("DELETE FROM matches WHERE id=?", (mid,))
+    engine.refresh_run(conn, r1); engine.refresh_run(conn, r2)
+    assert "BANK_DEBIT_NOT_IN_BOOK" in codes(conn, r1) and "BANK_DEBIT_NOT_IN_BOOK" in codes(conn, r2)
+    manual_before = conn.execute("SELECT COUNT(*) FROM matches").fetchone()[0]
+
+    out = engine.recheck_account(conn, 1, "test")
+    assert out["new_matches"] == 2 and out["open_after"] == out["open_before"] - 5
+    # recorded on day 1, so day 1's own exceptions are corrected too
+    assert {r[0] for r in conn.execute("SELECT run_id FROM matches WHERE created_by='system (re-check)'")} == {r1}
+    assert "BANK_DEBIT_NOT_IN_BOOK" not in codes(conn, r1) and "RENEWAL_NETTED" in codes(conn, r1)
+    assert "BANK_DEBIT_NOT_IN_BOOK" not in codes(conn, r2)
+    assert conn.execute("SELECT COUNT(*) FROM matches").fetchone()[0] == manual_before + 2
+    assert brs(conn, r1)["tallies"] and brs(conn, r2)["tallies"]
+
+    # a match a person removes is never re-created automatically
+    sweep = conn.execute("SELECT id FROM matches WHERE method LIKE 'Sweep%'").fetchone()[0]
+    conn.execute("UPDATE matches SET run_id=? WHERE id=?", (r2, sweep))      # unmatch works on the latest run
+    engine.unmatch(conn, sweep, "test", "wrong branch")
+    assert engine.recheck_account(conn, 1, "test")["new_matches"] == 0
