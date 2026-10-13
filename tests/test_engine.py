@@ -729,3 +729,31 @@ def test_recheck_applies_new_rules_to_old_runs(conn, tmp_path):
     conn.execute("UPDATE matches SET run_id=? WHERE id=?", (r2, sweep))      # unmatch works on the latest run
     engine.unmatch(conn, sweep, "test", "wrong branch")
     assert engine.recheck_account(conn, 1, "test")["new_matches"] == 0
+
+
+def test_mini_statement_grand_total_and_footer(tmp_path):
+    import openpyxl
+    from app.parsers import parse_bank_statement
+    p = tmp_path / "mini.xlsx"
+    d = date(2026, 10, 10)
+    write_statement(p, d, 6000, [_upi("628338076055", "SAJNA K S", 980), _upi("628339674948", "ATHIRA SUNDARAN", 650),
+                                 _upi("664912713456", "HARIKRISHNA A V", 850)])
+    wb = openpyxl.load_workbook(p); ws = wb.active
+    ws.delete_rows(ws.max_row)                                   # drop the "End of statement" line
+    ws.append([None, "Grand Total:", None, None, None, None, "0", None, "2480", "8480.00 Cr"])
+    ws.append([None, None, None, "This is a system-generated statement and does not require any signature"])
+    ws.append(["Visit us at www.southindianbank.com. Customer Care 1800 425 1809"])
+    ws.append(["This is a mini statement generated for viewing purpose only."])
+    wb.save(p)
+    out = parse_bank_statement(p)
+    assert out["ok"], out["checks"]
+    assert len(out["rows"]) == 3 and out["closing"] == 8480
+    assert any(c["code"] == "BANK_GRAND_TOTAL" and c["level"] == "ok" for c in out["checks"])
+    # a Grand Total that disagrees with the rows is an error
+    ws = wb.active
+    for row in ws.iter_rows():
+        if row[1].value == "Grand Total:":
+            row[8].value = "2400"
+    wb.save(p)
+    out = parse_bank_statement(p)
+    assert not out["ok"] and any(c["code"] == "BANK_GRAND_TOTAL" for c in out["checks"])

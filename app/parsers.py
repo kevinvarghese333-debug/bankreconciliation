@@ -255,19 +255,34 @@ def parse_bank_statement(path: str | Path) -> dict:
 
     rows = []
     bad_rows = []
+    grand = None          # the statement's own "Grand Total" row, when it prints one
+    footer = 0
     for i in range(hdr + 1, len(df)):
         r = df.iloc[i].tolist()
         raw_date = r[c_date]
         narr = "" if pd.isna(r[c_narr]) else str(r[c_narr]).strip()
         joined = " ".join(str(x) for x in r if not pd.isna(x))
+        low = joined.lower()
+        if re.match(r"^\s*grand\s*total", low):
+            # SIB mini statement: transactions end here; what follows is the bank's footer text
+            try:
+                grand = {"row_no": i + 1,
+                         "withdrawal": abs(to_amount(r[c_wd])) if not pd.isna(r[c_wd]) else None,
+                         "deposit": abs(to_amount(r[c_dp])) if not pd.isna(r[c_dp]) else None,
+                         "balance": to_amount(r[c_bal]) if not pd.isna(r[c_bal]) else None}
+            except ValueError:
+                grand = {"row_no": i + 1, "withdrawal": None, "deposit": None, "balance": None}
+            break
         if (pd.isna(raw_date) or str(raw_date).strip() == "") and not narr:
-            if "end of" in joined.lower() or not joined.strip():
+            if "end of" in low or not joined.strip():
                 continue
         d = to_date(raw_date)
         if d is None:
             has_amount = any(not pd.isna(r[c]) and str(r[c]).strip() not in ("", "0", "0.00")
                              for c in (c_wd, c_dp))
-            if not has_amount and ("end of" in joined.lower() or "total" in joined.lower() or not joined.strip()):
+            if not has_amount:
+                # a line of text with no money on it (bank's notes, page footer): nothing to reconcile
+                footer += bool(joined.strip())
                 continue
             bad_rows.append(i + 1)
             continue
@@ -354,6 +369,19 @@ def parse_bank_statement(path: str | Path) -> dict:
     closing = rows[-1]["balance"]
     tot_wd = round(sum(r["withdrawal"] for r in rows), 2)
     tot_dp = round(sum(r["deposit"] for r in rows), 2)
+    if grand:
+        diffs = [f"{label}: statement total {inr(g)}, transactions add up to {inr(c)}"
+                 for label, g, c in (("withdrawals", grand["withdrawal"], tot_wd), ("deposits", grand["deposit"], tot_dp),
+                                     ("closing balance", grand["balance"], closing))
+                 if g is not None and abs(g - c) > TOL]
+        if diffs:
+            checks.append(check("error", "BANK_GRAND_TOTAL",
+                                f"The statement's Grand Total (Excel row {grand['row_no']}) does not agree — "
+                                + "; ".join(diffs) + ". Rows may be missing or edited."))
+        else:
+            checks.append(check("ok", "BANK_GRAND_TOTAL",
+                                f"Grand Total row agrees with the transactions (withdrawals {inr(tot_wd)}, "
+                                f"deposits {inr(tot_dp)}, closing {inr(closing)}). Bank's footer notes below it ignored."))
     if abs(opening - tot_wd + tot_dp - closing) > TOL:
         checks.append(check("error", "BANK_TOTALS",
                             f"Opening {inr(opening)} − withdrawals {inr(tot_wd)} + deposits {inr(tot_dp)} "
