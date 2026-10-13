@@ -757,3 +757,17 @@ def test_mini_statement_grand_total_and_footer(tmp_path):
     wb.save(p)
     out = parse_bank_statement(p)
     assert not out["ok"] and any(c["code"] == "BANK_GRAND_TOTAL" for c in out["checks"])
+
+
+def test_excel_bank_statement_has_customer_name(conn, tmp_path):
+    from io import BytesIO
+    import openpyxl
+    from app import report
+    rid, _, _ = _day(conn, tmp_path, 1, date(2026, 9, 29), 100000, [
+        ("RAP/627311185948/ 0000095504 /VIJAYKRISHNA K R/", 37882, 0), ("DIVIN BIJU/", 1000, 0)],
+        [dict(vno=1, name="VIJAYKRISHNA K R", loan_ac="1", payment=37882)])
+    data, _ = report.build_report(conn, rid)
+    ws = openpyxl.load_workbook(BytesIO(data))["Bank Statement"]
+    assert [c.value for c in ws[1]][2:5] == ["Particulars", "Customer name", "Withdrawal"]
+    names = [row[3].value for row in ws.iter_rows(min_row=2)]
+    assert names[:2] == ["VIJAYKRISHNA K R", "DIVIN BIJU"]

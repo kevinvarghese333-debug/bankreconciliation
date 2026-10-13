@@ -264,13 +264,14 @@ def build_report(conn, run_id: int) -> tuple[bytes, str]:
     # ------------------------------------------------------------------ source data with status
     own = [i for i in items if i["run_id"] == run_id]
     wbk = wb.create_sheet("Bank Statement")
-    r = _table(wbk, 1, ["Sl", "Date", "Particulars", "Withdrawal", "Deposit", "Balance", "Channel", "UTR / Ref",
-                        "Status"], [6, 12, 70, 15, 15, 18, 8, 16, 18])
+    r = _table(wbk, 1, ["Sl", "Date", "Particulars", "Customer name", "Withdrawal", "Deposit", "Balance", "Channel",
+                        "UTR / Ref", "Status"], [6, 12, 70, 28, 15, 15, 18, 8, 16, 18])
     for it in sorted((i for i in own if i["side"] == "bank"), key=lambda i: i["row_no"]):
         st, is_open = status(it)
-        _put(wbk, r, [it.get("sl"), it["date"], it["text"], it["amount"] if it["dir"] == "out" else None,
+        _put(wbk, r, [it.get("sl"), it["date"], it["text"], it.get("name") or "",
+                      it["amount"] if it["dir"] == "out" else None,
                       it["amount"] if it["dir"] == "in" else None, it.get("balance"), it.get("channel"),
-                      it.get("ref"), st], amount_cols=(4, 5, 6), date_cols=(2,),
+                      it.get("ref"), st], amount_cols=(5, 6, 7), date_cols=(2,),
              fill="F8D7DA" if is_open else None)
         r += 1
     wbb = wb.create_sheet("Bank Book")
