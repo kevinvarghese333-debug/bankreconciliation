@@ -51,16 +51,16 @@
       <div class="f"></div>
     </div>
     <div class="drop" id="d2">
-      <input type="file" name="book_file" accept=".xls,.xlsx,.csv" required>
-      <div class="t">2 · Bank book from ERP</div>
-      <div class="muted small">Bank Book report .xlsx for the same ledger and date</div>
+      <input type="file" name="book_file" accept=".xls,.xlsx,.csv" multiple required>
+      <div class="t">2 · Bank book(s) from ERP</div>
+      <div class="muted small">Bank Book report .xlsx for the same date. ICICI: select both books (UPI and NACH) together</div>
       <div class="f"></div>
     </div>
   </div>
   <details style="margin-top:14px">
     <summary class="small">Back-dated entries were posted for an earlier day? Add a fresh bank book (optional)</summary>
     <div class="drop" style="margin-top:10px;max-width:520px">
-      <input type="file" name="backdated_file" accept=".xls,.xlsx,.csv">
+      <input type="file" name="backdated_file" accept=".xls,.xlsx,.csv" multiple>
       <div class="t">3 · Re-downloaded bank book for earlier day(s)</div>
       <div class="muted small">Same ledger, from the day the back-dated entries belong to, up to the last reconciled day.
         The app finds every voucher posted, changed or deleted since that day was reconciled.</div>

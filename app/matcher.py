@@ -251,6 +251,8 @@ class Matcher:
     def run(self) -> list[dict]:
         for direction in ("out", "in"):
             self.reference_pass(direction)
+            if direction == "in":
+                self.nach_pass()
             self.sweep_pass(direction)
             if direction == "in":
                 self.utr_l4_passes()
@@ -429,6 +431,29 @@ class Matcher:
             if sub:
                 self.add(sub, [k], "Several bank lines = one book entry (same name)", "review",
                          f"{len(sub)} bank lines from '{k['name']}' add up to this book entry")
+
+    def nach_pass(self):
+        """NACH settlement: the bank credits one batch (ICICI "TPSL-…-NACH5705") for many EMIs, which the ERP
+        books one by one, usually in a separate NACH bank book. Bank credit = sum of those book receipts."""
+        bank_refs = {re.sub(r"\D", "", b.get("ref") or "") for b in self.bank if b.get("ref")}
+        for b in sorted(self.free(self.bank, "in"), key=lambda x: -x["amount"]):
+            if b.get("channel") != "NACH" or b["key"] in self.used:
+                continue
+            cands = [k for k in self.free(self.book, "in") if days_apart(b["date"], k["date"]) <= 3
+                     and not (k.get("instr_no") and k["instr_no"] in bank_refs)]
+            groups = defaultdict(list)
+            for k in cands:
+                groups[(k.get("book_no", 1), k["date"])].append(k)
+            whole = [g for g in groups.values() if same_amount(sum(k["amount"] for k in g), b["amount"])]
+            if len(whole) == 1:
+                g = whole[0]
+                self.add([b], g, "NACH settlement = bank book entries", "strong",
+                         f"{len(g)} NACH receipt(s) in {g[0].get('book_name') or 'the bank book'} add up to this credit")
+                continue
+            sub = find_subset(b["amount"], cands, max_size=12, max_items=40)
+            if sub:
+                self.add([b], sub, "NACH settlement = bank book entries (partial)", "review",
+                         f"{len(sub)} receipt(s) add up to this NACH credit; other NACH entries remain — confirm the split")
 
     def renewal_pass(self):
         """Loan renewal settled net: the bank pays only (new loan − closure of the old loan), while the
@@ -706,6 +731,46 @@ def build_flags(bank: list[dict], book: list[dict], matches: list[dict], account
               + "; ".join(parts) + ".",
               [x for bs, ks in hol_in if min(b["date"] for b in bs) == hd for x in (*[b["key"] for b in bs], *[k["key"] for k in ks])])
 
+    # transaction-ID check: the last 4 digits staff type in the ERP (Instrument.Det) must be the bank's transaction ID
+    placeholder = set()
+    _seen = defaultdict(set)
+    for k in book:
+        if k["dir"] == "in" and k.get("l4"):
+            _seen[(k["l4"], k["date"])].add(clean_name(k["name"]))
+    _bank_l4 = {re.sub(r"\D", "", b.get("ref") or "")[-4:] for b in bank if b["dir"] == "in"}
+    placeholder = {l4 for (l4, _), ns in _seen.items() if len(ns) >= 3 and l4 not in _bank_l4}
+    verified = checked = 0
+    mism = []
+    for m in matches:
+        bs = [byk[x] for x in m["bank"] if x in byk]
+        ks = [byk[x] for x in m["book"] if x in byk]
+        if not bs or not ks or bs[0]["dir"] != "in" or m["method"].startswith(("NACH", "Sweep", "Inter-branch", "Cash", "Voucher deleted", "Collections pooled")):
+            continue
+        b_ids = [re.sub(r"\D", "", b.get("ref") or "") for b in bs]
+        b_ids = [x for x in b_ids if len(x) >= 4]
+        k_ids = [(k, k.get("instr_no") or "") for k in ks if k.get("instr_no") and k.get("l4") not in placeholder]
+        if not b_ids or not k_ids:
+            continue
+        checked += 1
+        bad = [(k, i) for k, i in k_ids if not any(x.endswith(i) or x[-4:] == i[-4:] for x in b_ids)]
+        if bad:
+            mism.append((m, bs, bad))
+        else:
+            verified += 1
+    for m, bs, bad in mism[:40]:
+        f("medium", "TXN_ID_MISMATCH", "Transaction ID entered in the ERP does not match the bank",
+          f"Bank credit ₹{inr(sum(b['amount'] for b in bs))} from {bs[0]['name'] or '—'} has transaction ID "
+          f"{', '.join(b.get('ref') or '' for b in bs)}, but the ERP entry "
+          + "; ".join(f"Vchr {k['vno']} {k['name']} carries …{i[-4:]}" for k, i in bad[:3])
+          + f". Matched by '{m['method']}'. Check the receipt was posted against the right payment.",
+          [*m["bank"], *m["book"]])
+    if len(mism) > 40:
+        f("medium", "TXN_ID_MISMATCH", f"{len(mism) - 40} more transaction-ID mismatches", "See the Collections tab.", [])
+    if checked:
+        f("info", "TXN_ID_CHECK", f"Transaction ID verified on {verified} of {checked} matched collection(s)",
+          "For every collection that has a transaction ID on both sides, the last 4 digits typed in the ERP were "
+          f"compared with the bank's UTR / transaction ID. {len(mism)} did not agree.", [])
+
     # returned disbursals: the borrower was NOT paid, whatever the matching says
     for b in bank:
         if b.get("channel") == "RAP-REV" and not b.get("carried"):
@@ -754,8 +819,9 @@ def build_flags(bank: list[dict], book: list[dict], matches: list[dict], account
 
     # data-entry quality in ERP instrument field
     by_l4 = defaultdict(set)
+    nach_keys = {x for m in matches if m["method"].startswith("NACH") for x in m["book"]}
     for k in book:
-        if k["dir"] == "in" and k.get("l4") and not k.get("carried"):
+        if k["dir"] == "in" and k.get("l4") and not k.get("carried") and k["key"] not in nach_keys:
             by_l4[(k["l4"], k["date"])].add(clean_name(k["name"]))
     bank_l4 = {(b.get("ref") or "")[-4:] for b in bank if b["dir"] == "in"}
     for (l4, d), names in by_l4.items():

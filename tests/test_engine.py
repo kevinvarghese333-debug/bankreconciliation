@@ -916,3 +916,70 @@ def test_bulk_upload_identifies_pairs_and_lists_missing(conn, tmp_path):
     b = _batch_load(bid)
     assert sum(1 for v in b["results"].values() if v["status"] == "done") == 1
     assert conn.execute("SELECT COUNT(*) FROM runs").fetchone()[0] == 1
+
+
+def test_two_bank_books_nach_settlement_and_txn_id(conn, tmp_path):
+    """ICICI: UPI book + NACH book read as one ledger; NACH credit = NACH book; wrong last-4 flagged."""
+    d = date(2026, 10, 19)
+    b, k1, k2 = tmp_path / "b.xlsx", tmp_path / "upi.xlsx", tmp_path / "nach.xlsx"
+    write_statement(b, d, 1000, [_upi("626900001111", "ASHA", 300), _upi("626900002222", "BINU", 250),
+                                 ("TPSL-19/10/2026-NACH5705-ICIC", 0, 700)])
+    write_book(k1, d, 1500, [dict(vno=1, name="ASHA", loan_ac="1", instr="1111", receipt=300),
+                             dict(vno=2, name="BINU", loan_ac="2", instr="9999", receipt=250)], branch="Head Office")
+    write_book(k2, d, -500, [dict(vno=3, name="CHITRA", loan_ac="3", instr="79820261017004825", receipt=400),
+                             dict(vno=4, name="DEEPA", loan_ac="4", instr="80620261017004825", receipt=300)],
+               branch="Head Office")
+    rid = engine.reconcile(conn, 1, str(b), "b.xlsx", [str(k1), str(k2)], "upi.xlsx + nach.xlsx", "t",
+                           acknowledged=True, ack_reason="first run for this account", confirmed=True)
+    r = conn.execute("SELECT * FROM runs WHERE id=?", (rid,)).fetchone()
+    assert r["book_open"] == 1000 and r["book_file"] == "upi.xlsx + nach.xlsx"
+    assert json.loads(r["brs_json"])["clean"]
+    methods = [m[0] for m in conn.execute("SELECT method FROM matches WHERE run_id=?", (rid,))]
+    assert any(m.startswith("NACH settlement") for m in methods)
+    assert conn.execute("SELECT COUNT(*) FROM items WHERE run_id=? AND match_id IS NULL", (rid,)).fetchone()[0] == 0
+    codes = [f["code"] for f in json.loads(r["flags_json"])]
+    assert codes.count("TXN_ID_MISMATCH") == 1 and "TXN_ID_CHECK" in codes
+    items = [i for i in engine.run_items(conn, rid) if i["side"] == "book"]
+    assert {i["book_name"] for i in items} == {"upi.xlsx", "nach.xlsx"}
+
+
+def test_bulk_pairs_two_books_of_one_account(conn, tmp_path):
+    from app import batch
+    conn.execute("UPDATE accounts SET acc_no='105305000993', branch='Head Office', bank='ICICI' WHERE id=1")
+    conn.execute("UPDATE accounts SET branch='Head Office' WHERE id=2")
+    d = date(2026, 10, 19)
+    b, k1, k2 = tmp_path / "b_105305000993.xlsx", tmp_path / "upi.xlsx", tmp_path / "nach.xlsx"
+    write_statement(b, d, 1000, [_upi("626900001111", "ASHA", 300), ("TPSL-19/10/2026-NACH5705-ICIC", 0, 700)])
+    write_book(k1, d, 1500, [dict(vno=1, name="ASHA", loan_ac="1", instr="626900001111", receipt=300)],
+               branch="Head Office")
+    write_book(k2, d, -500, [dict(vno=3, name="CHITRA", loan_ac="3", instr="79820261017004825", receipt=700)],
+               branch="Head Office")
+    accounts = [dict(a) for a in conn.execute("SELECT * FROM accounts")]
+    files = []
+    for i, p in enumerate((b, k1, k2)):
+        info = batch.classify(str(p), p.name)
+        aid, how = batch.identify(conn, info, accounts)
+        files.append(dict(info, fid=f"f{i}", name=p.name, path=str(p), account_id=aid, how=how,
+                          date_from=info["date_from"].isoformat() if info["date_from"] else None))
+    assert files[0]["account_id"] == 1 and files[1]["account_id"] is None and files[2]["account_id"] is None
+    batch.resolve_by_content(files)
+    assert files[1]["account_id"] == 1 and "transaction ID" in files[1]["how"]
+    assert files[2]["account_id"] == 1 and "NACH" in files[2]["how"]
+    pl = batch.plan(files)
+    assert len(pl["pairs"]) == 1 and pl["pairs"][0]["books"] == ["f1", "f2"] and not pl["lonely"]
+
+
+def test_reconcile_form_accepts_two_bank_books(conn, tmp_path):
+    admin = _client_setup()
+    t = _tok(admin, "/reconcile")
+    d = date(2026, 10, 19)
+    b, k1, k2 = tmp_path / "b.xlsx", tmp_path / "upi.xlsx", tmp_path / "nach.xlsx"
+    write_statement(b, d, 1000, [_upi("626900001111", "ASHA", 300), ("TPSL-19/10/2026-NACH5705-ICIC", 0, 700)])
+    write_book(k1, d, 1500, [dict(vno=1, name="ASHA", loan_ac="1", instr="1111", receipt=300)], branch="Head Office")
+    write_book(k2, d, -500, [dict(vno=3, name="CHITRA", loan_ac="3", instr="79820261017004825", receipt=700)],
+               branch="Head Office")
+    files = [("bank_file", ("b.xlsx", b.read_bytes())), ("book_file", ("upi.xlsx", k1.read_bytes())),
+             ("book_file", ("nach.xlsx", k2.read_bytes()))]
+    r = admin.post("/reconcile", data={"account_id": "1", "csrf_token": t, "confirm_backdated": "1"}, files=files)
+    assert r.status_code == 200 and "upi.xlsx + nach.xlsx" in r.text
+    assert "2 bank books read together" in r.text

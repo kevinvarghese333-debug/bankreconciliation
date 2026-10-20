@@ -31,10 +31,12 @@ def write_book(path, d: date, opening: float, entries: list[dict], company="Free
     ws.append([f"{company}\n\nBank Book from {ds} to {ds}"])
     ws.append(["Br.ID", "Branch", "Br. Code", "Tran.Date", "Vchr.Num.", "Vchr.Type", "Accounts",
                "Instrument.Det", "Narration", "Notes", "Debit", "Credit", "Balance", "Remarks"])
-    ws.append([2, "Head Office", None, d, None, None, None, None, "Opening", None, 0, 0, 0, " - "])
-    ws.append([2, "Head Office", None, d, None, None, None, None, "Total", None, 0, 0, None, " - "])
-    ws.append([2, "Head Office", None, d, None, None, None, None, "Closing", None, 0, 0, None, " - "])
-    ws.append([3, branch, None, d, None, None, None, None, "Opening", None, opening, 0, opening, " - "])
+    if branch != "Head Office":  # the real export lists an empty Head Office section first
+        ws.append([2, "Head Office", None, d, None, None, None, None, "Opening", None, 0, 0, 0, " - "])
+        ws.append([2, "Head Office", None, d, None, None, None, None, "Total", None, 0, 0, None, " - "])
+        ws.append([2, "Head Office", None, d, None, None, None, None, "Closing", None, 0, 0, None, " - "])
+    op_dr, op_cr = (opening, 0) if opening >= 0 else (0, -opening)
+    ws.append([3, branch, None, d, None, None, None, None, "Opening", None, op_dr, op_cr, opening, " - "])
     bal = opening
     dr = cr = 0.0
     for e in entries:
@@ -48,7 +50,7 @@ def write_book(path, d: date, opening: float, entries: list[dict], company="Free
                    "x", (f"{e['instr']}, Dt.:{e.get('instr_date', d):%d-%b-%Y}" if e.get("instr") else None), narr, "",
                    e.get("receipt", 0), e.get("payment", 0), bal, ""])
     ws.append([3, branch, None, d, None, None, None, None, "Total", None,
-               round(opening + dr, 2), round(cr, 2), None, " - "])
-    ws.append([3, branch, None, d, None, None, None, None, "Closing", None, bal, 0, None, " - "])
+               round(op_dr + dr, 2), round(op_cr + cr, 2), None, " - "])
+    ws.append([3, branch, None, d, None, None, None, None, "Closing", None, max(bal, 0), max(-bal, 0), None, " - "])
     wb.save(path)
     return bal

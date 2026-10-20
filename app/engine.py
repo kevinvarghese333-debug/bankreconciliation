@@ -12,7 +12,7 @@ from datetime import date, timedelta
 
 from . import db
 from .matcher import Matcher, build_flags, compute_brs, TOL
-from .parsers import parse_bank_book, parse_bank_statement, file_hash, inr, check
+from .parsers import parse_bank_book, parse_bank_books, parse_bank_statement, file_hash, files_hash, inr, check
 
 WINDOW_DAYS = 7
 AGED_DAYS = 3
@@ -43,6 +43,14 @@ def bank_item(r: dict) -> dict:
     }
 
 
+def book_names(book_path, book_name):
+    """Original file names of several bank books (stored joined with ' + ')."""
+    if isinstance(book_path, (list, tuple)):
+        n = [x.strip() for x in (book_name or "").split(" + ")]
+        return n if len(n) == len(book_path) else None
+    return None
+
+
 def book_item(r: dict) -> dict:
     return {
         "side": "book", "dir": "out" if r["payment"] else "in",
@@ -52,7 +60,7 @@ def book_item(r: dict) -> dict:
         "loan_ac": r["loan_ac"], "loan_type": r["loan_type"], "vno": r["vno"], "vtype": r["vtype"],
         "branch": r["branch"], "accounts": r["accounts"], "narration": r["narration"], "notes": r["notes"],
         "text": " ".join([r["narration"], r["instrument"], r["notes"], r["remarks"]]),
-        "row_no": r["row_no"],
+        "row_no": r["row_no"], "book_no": r.get("book_no", 1), "book_name": r.get("book_name", ""),
     }
 
 
@@ -206,7 +214,7 @@ def find_backdated(conn, account_id: int, last, fresh_path: str, book: dict) -> 
     Vouchers in the fresh export but not stored were posted (or changed) after the day was reconciled;
     stored vouchers missing from it were deleted or changed. If they account for the whole gap between the
     previous book closing and today's book opening, the gap is explained voucher by voucher."""
-    fresh = parse_bank_book(fresh_path)
+    fresh = parse_bank_books(fresh_path)  # one file, or several books of the same ledger
     out = {"explains": False, "added": [], "removed_open": [], "removed_matched": [], "net": 0.0, "message": ""}
     if not fresh.get("ok"):
         out["message"] = ("The re-downloaded bank book could not be read: "
@@ -280,7 +288,7 @@ def _reconcile(conn, account_id, bank_path, bank_name, book_path, book_name, use
         raise Blocked([check("error", "ACCOUNT", "Unknown account.")], [])
 
     bank = parse_bank_statement(bank_path)
-    book = parse_bank_book(book_path)
+    book = parse_bank_books(book_path, book_names(book_path, book_name))
     checks = [dict(c, source="Bank statement") for c in bank["checks"]] + \
              [dict(c, source="Bank book") for c in book["checks"]]
     if not bank.get("ok") or not book.get("ok"):
@@ -324,15 +332,18 @@ def _reconcile(conn, account_id, bank_path, bank_name, book_path, book_name, use
             (f" to {p_to:%d-%m-%Y}" if p_to != p_from else "") + ".")
 
     # --- same file must not be reconciled twice
-    bh, kh = file_hash(bank_path), file_hash(book_path)
-    for h, label in ((bh, "bank statement"), (kh, "bank book")):
+    bh, kh = file_hash(bank_path), files_hash(book_path)
+    singles = [] if isinstance(book_path, (str,)) else [(file_hash(p), "bank book") for p in book_path if p]
+    for h, label in ((bh, "bank statement"), (kh, "bank book"), *singles):
         prev = conn.execute("SELECT r.id, r.period_to, a.nickname FROM runs r JOIN accounts a ON a.id=r.account_id "
                             "WHERE r.bank_hash=? OR r.book_hash=?", (h, h)).fetchone()
         if prev:
             add("error", "DUPLICATE_FILE",
                 f"This exact {label} file was already used in run #{prev['id']} "
                 f"({prev['nickname']}, {prev['period_to']}).")
-    if bh == kh:
+    if len({h for h, _ in singles}) < len(singles):
+        add("error", "SAME_BOOK_TWICE", "The same bank book file was selected twice.")
+    if bh == kh or any(bh == h for h, _ in singles):
         add("error", "SAME_FILE", "The same file was uploaded as both bank statement and bank book.")
 
     # --- sequence and continuity with the previous run

@@ -145,6 +145,22 @@ of the ICICI ledger. The app reads:
 - the UTR from each UPI line, for matching against the last 4 digits in Instrument.Det;
 - NACH settlement lines (e.g. `TPSL-…-NACH5705`).
 
+**Two bank books.** In the ERP the ICICI ledger is kept as two bank books: UPI collections in one, NACH collections
+in the other. Select **both** book files in the "Bank book(s)" box (or drop both into bulk upload). They are read as
+one ledger: openings and closings are added (the combined opening must equal the bank's opening), and every entry
+remembers which book it came from. A NACH credit is matched to the NACH book's receipts of that day when they add up
+to it exactly ("NACH settlement = bank book entries"); if only some of them add up, the match is marked Verify.
+In bulk upload, a Head Office book is tied to the ICICI account by its contents: UPI transaction IDs that also
+appear on the ICICI statement, or a total equal to one of its NACH credits.
+
+### Transaction-ID check (UPI and NEFT collections)
+
+For every matched collection that has a transaction ID on both sides, the last 4 digits staff typed in the ERP
+(Instrument.Det) are compared with the bank's UTR / transaction ID. A disagreement is listed as a Medium exception
+"Transaction ID entered in the ERP does not match the bank" with both numbers, so the receipt can be checked against
+the right payment. An Info line shows how many were verified. Day-total (pooled), sweep, NACH and cash matches are
+not checked.
+
 ### Late-night lines dated the next day
 
 SIB and ICICI statements often end with a line just after midnight that is dated the next day. That line is left out

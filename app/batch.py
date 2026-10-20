@@ -32,7 +32,9 @@ def classify(path: str, name: str) -> dict:
     if _find_header(df, BOOK_HEADER) is not None:
         book = parse_bank_book(path)
         info.update(kind="book", date_from=book.get("period_from"), date_to=book.get("period_to"),
-                    opening=book.get("opening"))
+                    opening=book.get("opening"), receipts=book.get("total_receipts") or 0)
+        rows = book.get("rows", [])
+        info["utrs"] = sorted({r["instr_no"] for r in rows if len(r.get("instr_no") or "") >= 12})[:2000]
         info["branches"] = [b["branch"] for b in book.get("branches", [])
                             if b.get("count") or abs(b.get("opening") or 0) > TOL or abs(b.get("closing") or 0) > TOL]
         if not book.get("ok"):
@@ -45,6 +47,10 @@ def classify(path: str, name: str) -> dict:
     dates = sorted({r["date"] for r in st.get("rows", [])})
     info.update(kind="statement", date_from=dates[0] if dates else None, date_to=dates[-1] if dates else None,
                 opening=st.get("opening"))
+    rows = st.get("rows", [])
+    info["utrs"] = sorted({re.sub(r"\D", "", r.get("ref") or "") for r in rows
+                           if len(re.sub(r"\D", "", r.get("ref") or "")) >= 12})[:5000]
+    info["nach"] = [r["deposit"] for r in rows if r.get("channel") == "NACH" and r.get("deposit")]
     digits = re.sub(r"\D", "", st.get("account_no") or "")
     if len(digits) < 4:
         found = re.findall(r"(\d{4,})", re.sub(r"\d{1,2}-\d{1,2}-\d{4}", "", name))  # ignore dates in the name
@@ -96,11 +102,34 @@ def identify(conn, info: dict, accounts: list[dict]) -> tuple[int | None, str]:
                 and abs(last[a["id"]]["book_close"] - info["opening"]) <= TOL]
         if len(hits) == 1:
             return hits[0]["id"], (f"branch {hits[0].get('branch')} + " if cands else "") + "opening = last book closing"
+        info["cands"] = [a["id"] for a in cands]
         if len(cands) > 1:
             return None, (f"Branch {', '.join(active)} has {len(cands)} accounts ("
                           + ", ".join(f"…{a['acc_no'][-4:]}" for a in cands) + "). Choose which one.")
         return None, f"No account is set up for branch {', '.join(active)}."
     return None, "Not a bank statement or an ERP bank book."
+
+
+def resolve_by_content(files: list[dict]) -> None:
+    """Books whose branch has several accounts (e.g. Head Office: SIB and ICICI) are tied to an account
+    by what is inside them: UPI transaction IDs shared with that account's statement, or a total that equals
+    one of its NACH credits (the separate NACH bank book)."""
+    stmts = [f for f in files if f["kind"] == "statement" and f.get("account_id")]
+    for f in files:
+        if f["kind"] != "book" or f.get("account_id") or not f.get("cands"):
+            continue
+        same = [s for s in stmts if s["account_id"] in f["cands"] and s.get("date_from") == f.get("date_from")]
+        hits = {}
+        for s in same:
+            common = set(f.get("utrs") or []) & set(s.get("utrs") or [])
+            if common:
+                hits.setdefault(s["account_id"], f"{len(common)} transaction ID(s) also on the …"
+                                f"{s['name'][-12:]} statement")
+            elif f.get("receipts") and any(abs(n - f["receipts"]) <= TOL for n in s.get("nach") or []):
+                hits.setdefault(s["account_id"], "total equals a NACH credit on the statement")
+        if len(hits) == 1:
+            (aid, how), = hits.items()
+            f["account_id"], f["how"] = aid, how
 
 
 def plan(files: list[dict]) -> dict:
@@ -112,23 +141,23 @@ def plan(files: list[dict]) -> dict:
             by[f["account_id"]][f["kind"]].append(f)
     pairs, lonely, dupes = [], [], []
     for aid, g in by.items():
-        books = sorted(g["book"], key=lambda f: f["date_from"] or "")
         stmts = sorted(g["statement"], key=lambda f: f["date_from"] or "")
+        groups = defaultdict(list)  # several books of one day = one ledger kept as two books (ICICI UPI + NACH)
+        for b in g["book"]:
+            groups[b["date_from"]].append(b)
         used = set()
-        for b in books:
-            match = [s for s in stmts if s["fid"] not in used and s["date_from"] == b["date_from"]]
+        for d in sorted(groups, key=lambda x: x or ""):
+            bs = groups[d]
+            match = [s for s in stmts if s["fid"] not in used and s["date_from"] == d]
             if not match:  # statement of a day with no transactions has no date
                 match = [s for s in stmts if s["fid"] not in used and not s["date_from"]]
             if match:
                 s = match[0]
                 used.add(s["fid"])
-                key = (aid, b["date_from"])
-                if any((p["account_id"], p["date"]) == key for p in pairs):
-                    dupes += [s, b]
-                    continue
-                pairs.append({"account_id": aid, "date": b["date_from"], "stmt": s["fid"], "book": b["fid"]})
+                pairs.append({"account_id": aid, "date": d, "stmt": s["fid"],
+                              "book": "+".join(b["fid"] for b in bs), "books": [b["fid"] for b in bs]})
             else:
-                lonely.append(dict(b, needs="statement"))
+                lonely += [dict(b, needs="statement") for b in bs]
         for s in stmts:
             if s["fid"] not in used:
                 lonely.append(dict(s, needs="book"))

@@ -671,3 +671,72 @@ def parse_bank_book(path: str | Path) -> dict:
         "period_to": p_to,
         "branches": list(branches.values()),
     }
+
+
+def parse_bank_books(paths, names=None) -> dict:
+    """One or more ERP bank books for the same bank account and period, read as one book.
+
+    Some accounts are kept in the ERP as two ledgers (ICICI: UPI collections in one, NACH in the other).
+    Openings and closings are added, entries are put together, each tagged with the book it came from."""
+    if isinstance(paths, (str, Path)):
+        return parse_bank_book(paths)
+    paths = [p for p in paths if p]
+    if len(paths) == 1:
+        return parse_bank_book(paths[0])
+    books = [parse_bank_book(p) for p in paths]
+    if not names or len(names) != len(paths):
+        names = [Path(p).name for p in paths]
+    checks = []
+    for n, b in zip(names, books):
+        checks += [dict(c, message=f"[{n}] {c['message']}") for c in b.get("checks", [])]
+    if not all(b.get("ok") for b in books):
+        return {"ok": False, "rows": [], "checks": checks}
+    periods = {(b["period_from"], b["period_to"]) for b in books}
+    if len(periods) > 1:
+        checks.append(check("error", "BOOK_PERIODS_DIFFER",
+                            "The bank books cover different dates: " + "; ".join(
+                                f"{n}: {b['period_from']:%d-%m-%Y} to {b['period_to']:%d-%m-%Y}" for n, b in zip(names, books))))
+        return {"ok": False, "rows": [], "checks": checks}
+    rows = []
+    for i, (n, b) in enumerate(zip(names, books)):
+        for r in b["rows"]:
+            rows.append(dict(r, book_no=i + 1, book_name=n))
+    opening = round(sum(b["opening"] for b in books), 2)
+    closing = round(sum(b["closing"] for b in books), 2)
+    checks.append(check("ok", "BOOKS_COMBINED",
+                        f"{len(books)} bank books read together: " + "; ".join(
+                            f"{n} opening {inr(b['opening'])}, {len(b['rows'])} entries" for n, b in zip(names, books))
+                        + f". Combined opening {inr(opening)}, closing {inr(closing)}."))
+    first = books[0]
+    return {
+        "ok": True, "rows": rows, "checks": checks, "company": first.get("company"), "title": first.get("title"),
+        "opening": opening, "closing": closing,
+        "total_receipts": round(sum(b["total_receipts"] for b in books), 2),
+        "total_payments": round(sum(b["total_payments"] for b in books), 2),
+        "period_from": first["period_from"], "period_to": first["period_to"],
+        "branches": _merge_branches(books),
+    }
+
+
+def _merge_branches(books):
+    out = {}
+    for b in books:
+        for br in b["branches"]:
+            if br["branch"] in out:
+                o = out[br["branch"]]
+                for k, v in br.items():
+                    if isinstance(v, (int, float)) and not isinstance(v, bool):
+                        o[k] = round((o.get(k) or 0) + v, 2)
+            else:
+                out[br["branch"]] = dict(br)
+    return list(out.values())
+
+
+def files_hash(paths) -> str:
+    """Fingerprint of one file, or of a set of files (order does not matter)."""
+    if isinstance(paths, (str, Path)):
+        return file_hash(paths)
+    hs = sorted(file_hash(p) for p in paths if p)
+    if len(hs) == 1:
+        return hs[0]
+    return hashlib.sha256("+".join(hs).encode()).hexdigest()

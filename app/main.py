@@ -558,6 +558,17 @@ def reconcile_form(request: Request):
                   preselect=int(pre) if pre and pre.isdigit() else None)
 
 
+def _stage_many(uploads, folder: Path):
+    """Stage one or more files. One file → (path, name); several → ([paths], 'a + b'); none → (None, '')."""
+    ups = [u for u in (uploads or []) if u is not None and u.filename]
+    if not ups:
+        return None, ""
+    staged = [_stage(u, folder) for u in ups]
+    if len(staged) == 1:
+        return str(staged[0][0]), staged[0][1]
+    return [str(p) for p, _ in staged], " + ".join(n for _, n in staged)
+
+
 def _finish_upload(request, token, meta, acknowledged=False, reason=""):
     folder = STAGING / token
     c = conn()
@@ -585,7 +596,10 @@ def _finish_upload(request, token, meta, acknowledged=False, reason=""):
         keep = db.DATA_DIR / "uploads" / str(rid)
         keep.mkdir(parents=True, exist_ok=True)
         shutil.copy(meta["bank_path"], keep / meta["bank_name"])
-        shutil.copy(meta["book_path"], keep / meta["book_name"])
+        kp = meta["book_path"] if isinstance(meta["book_path"], list) else [meta["book_path"]]
+        kn = meta["book_name"].split(" + ") if len(kp) > 1 else [meta["book_name"]]
+        for src, nm in zip(kp, kn if len(kn) == len(kp) else [Path(x).name for x in kp]):
+            shutil.copy(src, keep / nm)
     shutil.rmtree(folder, ignore_errors=True)
     if meta.get("batch"):
         return redirect(f"/reconcile/batch/{meta['batch']}", ("ok", f"Run #{rid} reconciled. Continue with the rest below."),
@@ -595,7 +609,7 @@ def _finish_upload(request, token, meta, acknowledged=False, reason=""):
 
 @app.post("/reconcile")
 def reconcile(request: Request, account_id: int = Form(...), bank_file: UploadFile = File(...),
-              book_file: UploadFile = File(...), backdated_file: UploadFile | None = File(None),
+              book_file: list[UploadFile] = File(...), backdated_file: list[UploadFile] | None = File(None),
               confirm_backdated: str = Form(""), csrf_token: str = Form("")):
     if (g := guard(request, "reconcile")):
         return g
@@ -610,21 +624,20 @@ def reconcile(request: Request, account_id: int = Form(...), bank_file: UploadFi
     folder.mkdir(parents=True, exist_ok=True)
     try:
         bpath, bname = _stage(bank_file, folder)
-        kpath, kname = _stage(book_file, folder)
-        dpath, dname = (_stage(backdated_file, folder) if backdated_file is not None and backdated_file.filename
-                        else (None, ""))
+        kpath, kname = _stage_many(book_file, folder)
+        dpath, dname = _stage_many(backdated_file or [], folder)
     except ValueError as e:
         shutil.rmtree(folder, ignore_errors=True)
         return redirect("/reconcile", ("error", str(e)), request)
     meta = {"account_id": account_id, "bank_path": str(bpath), "bank_name": bname,
-            "book_path": str(kpath), "book_name": kname, "user": user(request), "confirmed": True,
-            "backdated_path": str(dpath) if dpath else None, "backdated_name": dname}
+            "book_path": kpath, "book_name": kname, "user": user(request), "confirmed": True,
+            "backdated_path": dpath, "backdated_name": dname}
     (folder / "meta.json").write_text(json.dumps(meta))
     return _finish_upload(request, token, meta)
 
 
 @app.post("/reconcile/backdated")
-def reconcile_backdated(request: Request, token: str = Form(...), backdated_file: UploadFile = File(...),
+def reconcile_backdated(request: Request, token: str = Form(...), backdated_file: list[UploadFile] = File(...),
                         csrf_token: str = Form("")):
     """Stop page → attach a fresh bank book of the earlier day(s) to find back-dated entries, then re-run."""
     if (g := guard(request, "reconcile")):
@@ -639,10 +652,10 @@ def reconcile_backdated(request: Request, token: str = Form(...), backdated_file
     if meta.get("user") != user(request):
         return redirect("/reconcile", ("error", "Upload belongs to another session."), request)
     try:
-        dpath, dname = _stage(backdated_file, folder)
+        dpath, dname = _stage_many(backdated_file, folder)
     except ValueError as e:
         return redirect("/reconcile", ("error", str(e)), request)
-    meta.update(backdated_path=str(dpath), backdated_name=dname)
+    meta.update(backdated_path=dpath, backdated_name=dname)
     mp.write_text(json.dumps(meta))
     return _finish_upload(request, token, meta)
 
@@ -692,9 +705,11 @@ def _batch_add(c, b: dict, uploads: list[UploadFile]) -> list[str]:
              "error": info["error"], "account_id": None, "how": ""}
         if info["kind"] != "unknown":
             f["account_id"], f["how"] = batch.identify(c, info, accounts)
+            f.update({k: info[k] for k in ("utrs", "nach", "receipts", "cands") if k in info})
         else:
             f["how"] = info["error"] or "Not a bank statement or an ERP bank book."
         b["files"].append(f)
+    batch.resolve_by_content(b["files"])
     return errors
 
 
@@ -712,7 +727,8 @@ def _batch_run(c, b: dict, username: str) -> None:
         if p["account_id"] in blocked_accounts:
             res[key] = {"status": "waiting", "message": "Waiting for the earlier day of this account."}
             continue
-        s, k = files[p["stmt"]], files[p["book"]]
+        s, ks = files[p["stmt"]], [files[x] for x in p.get("books") or [p["book"]]]
+        k = ks[0] if len(ks) == 1 else {"path": [x["path"] for x in ks], "name": " + ".join(x["name"] for x in ks)}
         token = secrets.token_hex(12)
         (STAGING / token).mkdir(parents=True, exist_ok=True)
         meta = {"account_id": p["account_id"], "bank_path": s["path"], "bank_name": s["name"],
@@ -798,7 +814,9 @@ def batch_view(request: Request, bid: str):
     rows = []
     for p in pl["pairs"]:
         r = b.get("results", {}).get(f"{p['stmt']}|{p['book']}", {"status": "pending"})
-        rows.append(dict(p, acc=accounts.get(p["account_id"]), stmt_f=files[p["stmt"]], book_f=files[p["book"]], **r))
+        bks = [files[x] for x in p.get("books") or [p["book"]]]
+        book_f = bks[0] if len(bks) == 1 else {"name": " + ".join(x["name"] for x in bks), "how": bks[0]["how"]}
+        rows.append(dict(p, acc=accounts.get(p["account_id"]), stmt_f=files[p["stmt"]], book_f=book_f, **r))
     lonely = [dict(files[fid], needs=pl["needs"].get(fid), acc=accounts.get(files[fid]["account_id"]))
               for fid in pl["lonely"]]
     unknown = [f for f in b["files"] if not f["account_id"]]
