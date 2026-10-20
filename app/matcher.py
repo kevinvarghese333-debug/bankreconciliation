@@ -268,8 +268,11 @@ class Matcher:
             if direction == "out":
                 # Payments: a unique amount on the day is strong evidence, but the name must be checked.
                 self.unique_amount_pass(direction)
-            elif self.pool_collections:
-                self.pooled_pass()
+            else:
+                # Large credits are fund transfers (own accounts, loans taken), not EMIs: one of a kind on the day.
+                self.unique_amount_pass(direction, min_amount=BIG_CREDIT, same_day_only=True)
+                if self.pool_collections:
+                    self.pooled_pass()
         return self.matches
 
     def pooled_pass(self):
@@ -498,10 +501,12 @@ class Matcher:
                 note += " — more than one combination fits; confirm the right one"
             self.add([b], [p, *sub], "Renewal — net settled" + (" (ambiguous)" if ambiguous else ""), "review", note)
 
-    def unique_amount_pass(self, direction):
-        """Only one bank and one book line left with this amount (within the date window)."""
-        banks = self.free(self.bank, direction)
-        books = self.free(self.book, direction)
+    def unique_amount_pass(self, direction, min_amount=0.0, same_day_only=False):
+        """Only one bank and one book line left with this amount (within the date window).
+        Strong when the bank's name is written in the book narration (e.g. 'PAID TO VARGHESE K O'),
+        or the credit is a transfer between the company's own accounts; otherwise Verify."""
+        banks = [b for b in self.free(self.bank, direction) if b["amount"] >= min_amount]
+        books = [k for k in self.free(self.book, direction) if k["amount"] >= min_amount]
         bank_by = defaultdict(list)
         book_by = defaultdict(list)
         for b in banks:
@@ -514,9 +519,35 @@ class Matcher:
                     and not bl[0].get("carried") and not kl[0].get("carried"):
                 b, k = bl[0], kl[0]
                 same_day = b["date"] == k["date"]
+                if same_day_only and not same_day:
+                    continue
+                why = named_in_narration(b, k) if b["amount"] >= BIG_CREDIT else ""
+                if why:
+                    kind = "Own-account transfer" if why.startswith("Transfer") else "Amount + name in narration"
+                    self.add([b], [k], kind + (" (unique on the day)" if same_day else " (unique in window)"),
+                             "strong", why)
+                    continue
                 self.add([b], [k], "Amount only (unique " + ("on the day)" if same_day else "in window)"), "review",
                          f"Names differ — bank '{b['name'] or b['text'][:40]}' vs book "
                          f"'{k['name'] or k.get('narration', '')[:40]}'. Verify.")
+
+
+BIG_CREDIT = 100000.0   # ₹1 lakh: above this a one-of-a-kind amount on the day is a fund movement, not an EMI
+OWN_COMPANY = re.compile(r"\bFREEMEN\b")
+TRANSFER_WORDS = re.compile(r"\b(TRANSFER\w*|TRANSFERED|TRF|SIB\s*1113|FUND|INTER\s*BANK)\b")
+
+
+def named_in_narration(b: dict, k: dict) -> str:
+    """Evidence beyond the amount for a large one-of-a-kind pair, or '' if none."""
+    hay = clean_name(" ".join([k.get("name") or "", k.get("narration") or "", k.get("text") or ""]))
+    words = set(hay.split())
+    toks = [t for t in clean_name(b.get("name") or "").split() if len(t) >= 3]
+    if toks and all(t in words for t in toks) and not OWN_COMPANY.search(clean_name(b.get("name") or "")):
+        return f"Bank name '{b['name']}' appears in the book narration"
+    if b["dir"] == "in" and OWN_COMPANY.search(clean_name(b.get("name") or b.get("text") or "")) \
+            and TRANSFER_WORDS.search(hay):
+        return "Transfer from the company's own account; the book entry is a fund transfer of the same amount"
+    return ""
 
 
 # ---------------------------------------------------------------------------- flags

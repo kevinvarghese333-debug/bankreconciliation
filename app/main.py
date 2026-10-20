@@ -50,6 +50,15 @@ try:
         db.set_setting(_c, "recheck_2026_10_03", db.now())
 except Exception as _e:  # never stop the app from starting
     print("re-check skipped:", _e)
+# One-time (20-10-2026): large one-of-a-kind credits (own-account transfers) and names written in the voucher
+# narration, applied to the …113 account (29-09-2026: ₹8,10,30,000 transfer left open).
+try:
+    if not db.get_setting(_c, "recheck_2026_10_20"):
+        for _a in _c.execute("SELECT id FROM accounts WHERE acc_no LIKE '%113' ORDER BY id").fetchall():
+            engine.recheck_account(_c, _a["id"], "system")
+        db.set_setting(_c, "recheck_2026_10_20", db.now())
+except Exception as _e:
+    print("re-check skipped:", _e)
 _c.close()
 
 app = FastAPI(title="Bank Reconciliation", docs_url=None, redoc_url=None, openapi_url=None)

@@ -983,3 +983,18 @@ def test_reconcile_form_accepts_two_bank_books(conn, tmp_path):
     r = admin.post("/reconcile", data={"account_id": "1", "csrf_token": t, "confirm_backdated": "1"}, files=files)
     assert r.status_code == 200 and "upi.xlsx + nach.xlsx" in r.text
     assert "2 bank books read together" in r.text
+
+
+def test_large_own_transfer_and_name_in_narration_pair(conn, tmp_path):
+    """29-09-2026: ₹8,10,30,000 from the company's own account (book JV 'AMOUNT TRANSFERED TO SIB 1113') stayed open."""
+    d = date(2026, 9, 29)
+    rid, _, _ = _day(conn, tmp_path, 1, d, 1000000,
+                     [("FREEMEN INVESTMENTS PRIVATE LIMITED", 0, 81030000), _upi("626900001111", "ASHA", 740),
+                      ("RTGS TO:SIBLH26272448778:K O VARGHESE", 70000000, 0)],
+                     [dict(vno=1, vtype="JV", name="", receipt=81030000,
+                           narration="AMOUNT TRANSFERED TO SIB 1113 81030000/-, A/c: IBV"),
+                      dict(vno=2, name="BEENA", loan_ac="2", instr="9999", receipt=800),
+                      dict(vno=3, name="", payment=70000000, narration="PART OF THE LOAN AMOUNT PAID TO VARGHESE K O")])
+    got = {m[0]: m[1] for m in conn.execute("SELECT method, confidence FROM matches WHERE run_id=?", (rid,))}
+    assert got.get("Own-account transfer (unique on the day)") == "strong"
+    assert got.get("Amount + name in narration (unique on the day)") == "strong"

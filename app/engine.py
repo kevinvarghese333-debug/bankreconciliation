@@ -11,7 +11,7 @@ from collections import defaultdict
 from datetime import date, timedelta
 
 from . import db
-from .matcher import Matcher, build_flags, compute_brs, TOL
+from .matcher import Matcher, build_flags, compute_brs, TOL, BIG_CREDIT, named_in_narration
 from .parsers import parse_bank_book, parse_bank_books, parse_bank_statement, file_hash, files_hash, inr, check
 
 WINDOW_DAYS = 7
@@ -831,6 +831,8 @@ def recheck_account(conn, account_id: int, user: str) -> dict:
         m.sweep_pass("out")
         m.sweep_pass("in")
         m.renewal_pass()
+        m.nach_pass()
+        m.unique_amount_pass("in", min_amount=BIG_CREDIT, same_day_only=True)
         byk = {i["key"]: i for i in open_}
         first_run = None
         methods: dict[str, int] = defaultdict(int)
@@ -847,15 +849,27 @@ def recheck_account(conn, account_id: int, user: str) -> dict:
             conn.execute(f"UPDATE items SET match_id=? WHERE id IN ({','.join('?' * len(keys))})",
                          (cur.lastrowid, *[int(k) for k in keys]))
             methods[mt["method"]] += 1
+        # payments paired on amount alone whose beneficiary is written in the voucher narration → confirmed
+        for mt in conn.execute("SELECT * FROM matches WHERE account_id=? AND manual=0 AND confidence='review' "
+                               "AND method LIKE 'Amount only%'", (account_id,)).fetchall():
+            its = [row_to_item(r) for r in conn.execute("SELECT * FROM items WHERE match_id=?", (mt["id"],))]
+            bs = [i for i in its if i["side"] == "bank"]
+            ks = [i for i in its if i["side"] == "book"]
+            if len(bs) == 1 and len(ks) == 1 and bs[0]["amount"] >= BIG_CREDIT and (why := named_in_narration(bs[0], ks[0])):
+                kind = "Own-account transfer" if why.startswith("Transfer") else "Amount + name in narration"
+                conn.execute("UPDATE matches SET method=?, confidence='strong', note=? WHERE id=?",
+                             (kind + mt["method"][len("Amount only"):], why + " · confirmed on re-check", mt["id"]))
+                methods[kind] += 1
+                first_run = mt["run_id"] if first_run is None else min(first_run, mt["run_id"])
         if first_run is not None:
             for r in conn.execute("SELECT id FROM runs WHERE account_id=? AND id>=? ORDER BY id",
                                   (account_id, first_run)).fetchall():
                 refresh_run(conn, r["id"])
         open_after = len(open_items_as_of(conn, account_id, last["id"]))
-        summary = {"account": acc["nickname"], "new_matches": len(m.matches), "methods": dict(methods),
+        summary = {"account": acc["nickname"], "new_matches": sum(methods.values()), "methods": dict(methods),
                    "open_before": open_before, "open_after": open_after}
         db.audit(conn, user, "recheck",
-                 f"{acc['nickname']} (…{acc['acc_no'][-4:]}): {len(m.matches)} new match(es)"
+                 f"{acc['nickname']} (…{acc['acc_no'][-4:]}): {sum(methods.values())} new or confirmed match(es)"
                  + (" — " + ", ".join(f"{n} × {k}" for k, n in methods.items()) if methods else "")
                  + f"; open items {open_before} → {open_after}")
     return summary
