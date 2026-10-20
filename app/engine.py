@@ -189,12 +189,92 @@ def latest_run(conn, account_id: int):
 # ---------------------------------------------------------------------------- main entry
 
 def reconcile(conn, account_id: int, bank_path: str, bank_name: str, book_path: str, book_name: str,
-              user: str, acknowledged: bool = False, ack_reason: str = "") -> int:
+              user: str, acknowledged: bool = False, ack_reason: str = "", backdated_path: str | None = None,
+              backdated_name: str = "", confirmed: bool | None = None) -> int:
     with _RUN_LOCK:
-        return _reconcile(conn, account_id, bank_path, bank_name, book_path, book_name, user, acknowledged, ack_reason)
+        return _reconcile(conn, account_id, bank_path, bank_name, book_path, book_name, user, acknowledged, ack_reason,
+                          backdated_path, backdated_name, confirmed)
 
 
-def _reconcile(conn, account_id, bank_path, bank_name, book_path, book_name, user, acknowledged, ack_reason) -> int:
+def _book_key(it: dict) -> tuple:
+    return (str(it.get("vno") or ""), (it.get("branch") or "").strip().upper(), it["dir"], round(it["amount"] * 100))
+
+
+def find_backdated(conn, account_id: int, last, fresh_path: str, book: dict) -> dict:
+    """Compare a fresh ERP export of days already reconciled with what the app stored for those days.
+
+    Vouchers in the fresh export but not stored were posted (or changed) after the day was reconciled;
+    stored vouchers missing from it were deleted or changed. If they account for the whole gap between the
+    previous book closing and today's book opening, the gap is explained voucher by voucher."""
+    fresh = parse_bank_book(fresh_path)
+    out = {"explains": False, "added": [], "removed_open": [], "removed_matched": [], "net": 0.0, "message": ""}
+    if not fresh.get("ok"):
+        out["message"] = ("The re-downloaded bank book could not be read: "
+                          + "; ".join(c["message"] for c in fresh["checks"] if c["level"] == "error"))
+        return out
+    f_from, f_to = fresh["period_from"], fresh["period_to"]
+    last_to = date.fromisoformat(last["period_to"])
+    first = conn.execute("SELECT MIN(period_from) d FROM runs WHERE account_id=?", (account_id,)).fetchone()["d"]
+    if f_to != last_to:
+        out["message"] = (f"The re-downloaded bank book must end on {last_to:%d-%m-%Y}, the last reconciled day "
+                          f"(it covers {f_from:%d-%m-%Y} to {f_to:%d-%m-%Y}).")
+        return out
+    if first and f_from < date.fromisoformat(first):
+        f_from = date.fromisoformat(first)
+    deleted_mids = {m["id"] for m in conn.execute(
+        "SELECT id FROM matches WHERE account_id=? AND method LIKE 'Voucher deleted%'", (account_id,))}
+    stored = [row_to_item(r) for r in conn.execute(
+        "SELECT * FROM items WHERE account_id=? AND side='book' AND date>=? AND date<=? ORDER BY id",
+        (account_id, f_from.isoformat(), f_to.isoformat()))]
+    stored = [i for i in stored if i.get("match_id") not in deleted_mids]
+    fresh_items = [book_item(r) for r in fresh["rows"] if f_from <= r["date"] <= f_to]
+    pool: dict[tuple, list] = defaultdict(list)
+    for it in stored:
+        pool[_book_key(it)].append(it)
+    added = []
+    for it in fresh_items:
+        k = _book_key(it)
+        if pool.get(k):
+            pool[k].pop(0)
+        else:
+            added.append(it)
+    removed = [it for lst in pool.values() for it in lst]
+    sign = lambda it: it["amount"] if it["dir"] == "in" else -it["amount"]
+    net = round(sum(sign(i) for i in added) - sum(sign(i) for i in removed), 2)
+    removed_open = [i for i in removed if not i.get("match_id")]
+    removed_matched = [i for i in removed if i.get("match_id")]
+    out.update(added=added, removed_open=removed_open, removed_matched=removed_matched, net=net)
+    desc = lambda i: f"Vchr {i.get('vno')} {i['date']:%d-%m-%Y} {i.get('name') or i.get('narration', '')[:30]} ₹{inr(i['amount'])}"
+    parts = []
+    if added:
+        parts.append(f"{len(added)} voucher(s) posted after reconciliation: " + "; ".join(desc(i) for i in added[:8])
+                     + (f" and {len(added) - 8} more" if len(added) > 8 else ""))
+    if removed:
+        parts.append(f"{len(removed)} voucher(s) deleted or changed since: " + "; ".join(desc(i) for i in removed[:8]))
+    found = (" Found " + ". ".join(parts) + f". Net effect ₹{inr(net)}.") if parts else " No voucher differs."
+    gap = round(book["opening"] - last["book_close"], 2)
+    if removed_matched:
+        out["message"] = ("Some vouchers that were already matched have since been deleted or changed in the ERP, so "
+                          "the earlier reconciliation itself is now wrong. An Admin should revoke from "
+                          f"{min(i['date'] for i in removed_matched):%d-%m-%Y} and reconcile again." + found)
+    elif abs(fresh["closing"] - book["opening"]) > TOL:
+        out["message"] = (f"The re-downloaded bank book closes at ₹{inr(fresh['closing'])} on {f_to:%d-%m-%Y}, but "
+                          f"today's bank book opens at ₹{inr(book['opening'])}. Download both again at the same time." + found)
+    elif abs(net - gap) > TOL:
+        out["message"] = (f"The differences found (₹{inr(net)}) do not fully explain the gap of ₹{inr(gap)}. "
+                          f"There may be back-dated entries before {f_from:%d-%m-%Y}: download the bank book from an "
+                          "earlier date." + found)
+    else:
+        out["explains"] = True
+        out["message"] = (f"Book opening ₹{inr(book['opening'])} = previous closing ₹{inr(last['book_close'])} + "
+                          f"back-dated changes ₹{inr(net)}, found in the re-downloaded bank book "
+                          f"{f_from:%d-%m-%Y} to {f_to:%d-%m-%Y}." + found
+                          + " They are added to this reconciliation and flagged.")
+    return out
+
+
+def _reconcile(conn, account_id, bank_path, bank_name, book_path, book_name, user, acknowledged, ack_reason,
+               backdated_path=None, backdated_name="", confirmed=None) -> int:
     acc = conn.execute("SELECT * FROM accounts WHERE id=?", (account_id,)).fetchone()
     if not acc:
         raise Blocked([check("error", "ACCOUNT", "Unknown account.")], [])
@@ -220,6 +300,19 @@ def _reconcile(conn, account_id, bank_path, bank_name, book_path, book_name, use
         add("error", "ACCOUNT_MISMATCH",
             f"Statement shows account {bank['account_no']}, but you selected …{acc['acc_no'][-4:]}.")
     p_from, p_to = book["period_from"], book["period_to"]
+    # SIB (and ICICI) often add a line just after midnight, dated the next day, to the end of a day's
+    # statement. It belongs to the next day: leave it out and close the day on the balance before it.
+    deferred = [r for r in bank["rows"] if r["date"] > p_to]
+    if deferred and bank["rows"] and bank["rows"][-len(deferred):] == deferred:
+        bank["rows"] = bank["rows"][:-len(deferred)]
+        bank["closing"] = bank["rows"][-1]["balance"] if bank["rows"] else bank["opening"]
+        add("ok", "BANK_NEXT_DAY",
+            f"{len(deferred)} line(s) dated after {p_to:%d-%m-%Y} at the end of the statement were left out "
+            f"(₹{inr(sum(r['deposit'] - r['withdrawal'] for r in deferred))}, e.g. "
+            f"{deferred[0]['date']:%d-%m-%Y} {deferred[0]['narration'][:50]}). They belong to the next day's "
+            f"reconciliation. Bank closing for this day taken as ₹{inr(bank['closing'])}.")
+    else:
+        deferred = []
     outside = [r for r in bank["rows"] if r["date"] < p_from or r["date"] > p_to]
     if outside:
         add("error", "PERIOD_MISMATCH",
@@ -245,6 +338,13 @@ def _reconcile(conn, account_id, bank_path, bank_name, book_path, book_name, use
     # --- sequence and continuity with the previous run
     last = latest_run(conn, account_id)
     carried = []
+    backdated_new: list[dict] = []
+    backdated_gone: list[dict] = []
+    if confirmed:
+        add("ok", "CONFIRM_BACKDATED", f"{user} confirmed that all back-dated entries are posted and updated, and that "
+                                       "there will be no more back-dated entries after downloading the report.")
+    elif confirmed is False:
+        add("error", "CONFIRM_BACKDATED", "Confirm that all back-dated entries are posted before reconciling.")
     if last:
         last_to = date.fromisoformat(last["period_to"])
         if p_from <= last_to:
@@ -261,6 +361,34 @@ def _reconcile(conn, account_id, bank_path, bank_name, book_path, book_name, use
                 f"Previous reconciliation ended {last_to:%d-%m-%Y}; this one starts {p_from:%d-%m-%Y}. "
                 "Days in between are not covered (fine for Sundays/holidays only if there were no transactions).",
                 can_ack=True)
+        prev_def = json.loads(last["deferred_json"] or "[]") if "deferred_json" in last.keys() else []
+        for r in prev_def:
+            r["date"] = date.fromisoformat(r["date"])
+            r["value_date"] = date.fromisoformat(r["value_date"]) if r.get("value_date") else r["date"]
+        if prev_def:
+            net_def = round(sum(r["deposit"] - r["withdrawal"] for r in prev_def), 2)
+            if (abs(last["bank_close"] - bank["opening"]) > TOL
+                    and abs(last["bank_close"] + net_def - bank["opening"]) <= TOL):
+                # today's statement starts after those lines: bring them in from yesterday's file
+                for r in prev_def:
+                    r["carried_from_prev_statement"] = True
+                bank["rows"] = prev_def + bank["rows"]
+                bank["opening"] = last["bank_close"]
+                add("ok", "BANK_NEXT_DAY_IN",
+                    f"{len(prev_def)} late-night line(s) from the previous statement (₹{inr(net_def)}) are not in "
+                    "today's statement, so they were brought in from yesterday's file.")
+            elif abs(last["bank_close"] - bank["opening"]) <= TOL:
+                missing = [r for r in prev_def if not any(
+                    abs(x["deposit"] - r["deposit"]) <= TOL and abs(x["withdrawal"] - r["withdrawal"]) <= TOL
+                    and (x["ref"] == r["ref"] or x["narration"] == r["narration"]) for x in bank["rows"])]
+                if missing:
+                    add("warning", "BANK_NEXT_DAY_MISSING",
+                        f"{len(missing)} late-night line(s) left out of the previous day are not in today's statement: "
+                        + "; ".join(f"{r['narration'][:40]} ₹{inr(r['deposit'] or r['withdrawal'])}" for r in missing[:5])
+                        + ". Check with the bank whether they were reversed.")
+                else:
+                    add("ok", "BANK_NEXT_DAY_IN",
+                        f"{len(prev_def)} late-night line(s) left out of the previous day appear in today's statement.")
         if abs(last["bank_close"] - bank["opening"]) > TOL:
             add("error", "BANK_CONTINUITY",
                 f"Bank opening ₹{inr(bank['opening'])} ≠ previous bank closing ₹{inr(last['bank_close'])} "
@@ -269,16 +397,28 @@ def _reconcile(conn, account_id, bank_path, bank_name, book_path, book_name, use
                 "This cannot be overridden — reconcile the missing day(s) first.")
         else:
             add("ok", "BANK_CONTINUITY", f"Bank opening ₹{inr(bank['opening'])} = previous closing.")
-        if abs(last["book_close"] - book["opening"]) > TOL:
+        if abs(last["book_close"] - book["opening"]) > TOL and backdated_path:
+            bd = find_backdated(conn, account_id, last, backdated_path, book)
+            if bd["explains"]:
+                add("ok", "BOOK_CONTINUITY", bd["message"])
+                backdated_new, backdated_gone = bd["added"], bd["removed_open"]
+            else:
+                add("error" if not acknowledged else "warning", "BOOK_CONTINUITY",
+                    f"Book opening ₹{inr(book['opening'])} ≠ previous book closing ₹{inr(last['book_close'])} "
+                    f"(difference ₹{inr(book['opening'] - last['book_close'])}). " + bd["message"], can_ack=True)
+        elif abs(last["book_close"] - book["opening"]) > TOL:
             add("error" if not acknowledged else "warning", "BOOK_CONTINUITY",
                 f"Book opening ₹{inr(book['opening'])} ≠ previous book closing ₹{inr(last['book_close'])} "
-                f"(difference ₹{inr(book['opening'] - last['book_close'])}). Usually a back-dated entry was posted "
-                "in the ERP for a date already reconciled. Undo back to that date and re-run with fresh exports, "
-                "or acknowledge to carry the difference as an unexplained item.",
+                f"(difference ₹{inr(book['opening'] - last['book_close'])}). Usually entries were posted, changed or "
+                f"deleted in the ERP for a date already reconciled (up to {last['period_to']}). Use 'Find the "
+                "back-dated entries' below with a fresh bank book export of the earlier day(s), or acknowledge to carry "
+                "the difference as an unexplained item.",
                 can_ack=True)
         else:
             add("ok", "BOOK_CONTINUITY", f"Book opening ₹{inr(book['opening'])} = previous closing.")
         carried = open_items_as_of(conn, account_id, last["id"])
+        gone_ids = {i["id"] for i in backdated_gone}
+        carried = [c for c in carried if c["id"] not in gone_ids]
 
     if not last:
         kinds = {r["channel"] for r in bank["rows"] if r["withdrawal"]}
@@ -293,7 +433,9 @@ def _reconcile(conn, account_id, bank_path, bank_name, book_path, book_name, use
 
     # --- the identity that must hold at the opening of the period
     prior_diff = cumulative_opening_diff(conn, account_id)
-    unexplained = round(bank["opening"] - book["opening"] - net_open(carried) - prior_diff, 2)
+    for it in backdated_new:
+        it["side"] = "book"
+    unexplained = round(bank["opening"] - book["opening"] - net_open(carried) - net_open(backdated_new) - prior_diff, 2)
     if abs(unexplained) > TOL:
         if not last:
             add("warning", "OPENING_DIFF",
@@ -333,10 +475,10 @@ def _reconcile(conn, account_id, bank_path, bank_name, book_path, book_name, use
         cur = conn.execute(
             """INSERT INTO runs (account_id, period_from, period_to, created_at, created_by, bank_file, bank_hash,
                book_file, book_hash, bank_open, bank_close, book_open, book_close, opening_diff_added, ack_reason,
-               checks_json) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+               checks_json, deferred_json) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (account_id, p_from.isoformat(), p_to.isoformat(), db.now(), user, bank_name, bh, book_name, kh,
              bank["opening"], bank["closing"], book["opening"], book["closing"], opening_added,
-             ack_reason.strip(), db.dumps(all_checks)))
+             ack_reason.strip(), db.dumps(all_checks), db.dumps(deferred) if deferred else ""))
         run_id = cur.lastrowid
         new_items = []
         for r in bank["rows"]:
@@ -353,6 +495,29 @@ def _reconcile(conn, account_id, bank_path, bank_name, book_path, book_name, use
                                (run_id, account_id, "book", it["dir"], it["date"].isoformat(), it["amount"],
                                 it["name"], it["ref"], db.dumps(it)))
             new_items.append(dict(it, key=str(cur.lastrowid), id=cur.lastrowid, run_id=run_id))
+        for it in backdated_new:
+            it = dict(it, backdated=True, posted_after=last["period_to"] if last else "")
+            it.pop("side", None)
+            it["side"] = "book"
+            cur = conn.execute("INSERT INTO items (run_id, account_id, side, dir, date, amount, name, ref, data_json) "
+                               "VALUES (?,?,?,?,?,?,?,?,?)",
+                               (run_id, account_id, "book", it["dir"], it["date"].isoformat(), it["amount"],
+                                it["name"], it["ref"], db.dumps(it)))
+            new_items.append(dict(it, key=str(cur.lastrowid), id=cur.lastrowid, run_id=run_id))
+        if backdated_gone:
+            cur = conn.execute(
+                "INSERT INTO matches (run_id, account_id, method, confidence, note, manual, created_at, created_by) "
+                "VALUES (?,?,?,?,?,0,?,?)",
+                (run_id, account_id, "Voucher deleted or changed in the ERP after reconciliation", "review",
+                 f"{len(backdated_gone)} open voucher(s) no longer in the ERP export: "
+                 + "; ".join(f"Vchr {i.get('vno')} ₹{inr(i['amount'])}" for i in backdated_gone[:10]),
+                 db.now(), "system"))
+            conn.execute(f"UPDATE items SET match_id=? WHERE id IN ({','.join('?' * len(backdated_gone))})",
+                         (cur.lastrowid, *[i["id"] for i in backdated_gone]))
+        if backdated_path:
+            db.audit(conn, user, "backdated_check",
+                     f"Run #{run_id}: re-downloaded bank book {backdated_name} · {len(backdated_new)} added, "
+                     f"{len(backdated_gone)} deleted/changed")
         for c in carried:
             c["carried"] = True
 

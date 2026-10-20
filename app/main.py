@@ -30,6 +30,18 @@ ROOT_PATH = "/" + os.environ.get("ROOT_PATH", "").strip("/") if os.environ.get("
 db.init()
 _c = db.connect()
 auth.ensure_env_user(_c)
+# One-time (20-10-2026): the ICICI collection account (NACH, dynamic UPI); its balance is swept to SIB …1113.
+try:
+    if not db.get_setting(_c, "seed_icici_0993"):
+        if not _c.execute("SELECT 1 FROM accounts WHERE acc_no LIKE '%0993'").fetchone() and \
+                _c.execute("SELECT COUNT(*) FROM accounts").fetchone()[0]:
+            _c.execute("INSERT INTO accounts(bank, acc_no, nickname, kind, branch, notes, created_at) VALUES (?,?,?,?,?,?,?)",
+                       ("ICICI Bank", "105305000993", "ICICI 0993 · NACH & UPI collections", "collection", "Head Office",
+                        "Automated collections (NACH, dynamic UPI); balance transferred to SIB …1113", db.now()))
+            db.audit(_c, "system", "account_added", "ICICI Bank 105305000993 (collection)")
+        db.set_setting(_c, "seed_icici_0993", db.now())
+except Exception as _e:
+    print("icici seed skipped:", _e)
 # One-time (03-10-2026): apply the new branch-name and loan-renewal rules to the …113 account's open items.
 try:
     if not db.get_setting(_c, "recheck_2026_10_03"):
@@ -316,9 +328,70 @@ def dashboard(request: Request):
         for r in recent:
             r["brs"] = json.loads(r["brs_json"] or "{}")
             r["summary"] = json.loads(r["summary_json"] or "{}")
+        from datetime import timedelta
+        yday = (date.today() - timedelta(days=1)).isoformat()
+        active = [a for a in accs if a["active"]]
+        st = {"accounts": len(active), "pending": [], "crit": 0, "high": 0, "unreviewed": 0, "unreviewed_run": None,
+              "unsigned": [], "tallied": 0, "untallied": [], "open": 0, "oldest": None, "yday": yday}
+        for a in active:
+            last = a["last"]
+            if not last or last["period_to"] < yday:
+                st["pending"].append(a)
+            if not last:
+                continue
+            sv = a["summary"].get("severity", {})
+            st["crit"] += sv.get("critical", 0)
+            st["high"] += sv.get("high", 0)
+            flags = engine.attach_reviews(c, last, json.loads(last["flags_json"] or "[]"))
+            unrev = sum(1 for f in flags if not f["review"] and f["severity"] in ("critical", "high"))
+            if unrev and not st["unreviewed_run"]:
+                st["unreviewed_run"] = last["id"]
+            st["unreviewed"] += unrev
+            if not last.get("checked_by"):
+                st["unsigned"].append(a)
+            if a["brs"].get("clean"):
+                st["tallied"] += 1
+            else:
+                st["untallied"].append(a)
+            st["open"] += a.get("open_count", 0)
+            if a.get("oldest_open") and (not st["oldest"] or a["oldest_open"] < st["oldest"]):
+                st["oldest"] = a["oldest_open"]
     finally:
         c.close()
-    return render(request, "dashboard.html", accounts=accs, recent=recent)
+    return render(request, "dashboard.html", accounts=accs, recent=recent, st=st)
+
+
+@app.get("/search", response_class=HTMLResponse)
+def search(request: Request):
+    """Find any bank line or bank book entry by customer name, UTR / reference, voucher or amount."""
+    if (g := guard(request)):
+        return g
+    q = (request.query_params.get("q") or "").strip()
+    rows = []
+    if len(q) >= 3:
+        c = conn()
+        try:
+            amt = None
+            try:
+                amt = round(float(q.replace(",", "").replace("₹", "")), 2)
+            except ValueError:
+                pass
+            like = f"%{q.upper()}%"
+            sql = ("SELECT i.*, a.nickname, a.acc_no, m.method, m.confidence, m.run_id AS match_run "
+                   "FROM items i JOIN accounts a ON a.id=i.account_id LEFT JOIN matches m ON m.id=i.match_id "
+                   "WHERE UPPER(i.name) LIKE ? OR UPPER(i.ref) LIKE ? OR UPPER(i.data_json) LIKE ?")
+            args = [like, like, like]
+            if amt is not None:
+                sql += " OR ABS(i.amount - ?) < 0.005"
+                args.append(amt)
+            sql += " ORDER BY i.date DESC, i.id DESC LIMIT 200"
+            for r in c.execute(sql, args):
+                it = engine.row_to_item(r)
+                it.update(nickname=r["nickname"], acc_no=r["acc_no"], method=r["method"], confidence=r["confidence"])
+                rows.append(it)
+        finally:
+            c.close()
+    return render(request, "search.html", q=q, rows=rows)
 
 
 # ---------------------------------------------------------------------------- accounts
@@ -491,11 +564,16 @@ def _finish_upload(request, token, meta, acknowledged=False, reason=""):
     try:
         try:
             rid = engine.reconcile(c, meta["account_id"], meta["bank_path"], meta["bank_name"], meta["book_path"],
-                                   meta["book_name"], user(request), acknowledged, reason)
+                                   meta["book_name"], user(request), acknowledged, reason,
+                                   backdated_path=meta.get("backdated_path"), backdated_name=meta.get("backdated_name", ""),
+                                   confirmed=bool(meta.get("confirmed")))
         except engine.Blocked as e:
             acc = c.execute("SELECT * FROM accounts WHERE id=?", (meta["account_id"],)).fetchone()
+            last = engine.latest_run(c, meta["account_id"])
+            book_gap = any(ch["code"] == "BOOK_CONTINUITY" and ch["level"] != "ok" for ch in e.checks)
             return render(request, "blocked.html", checks=e.checks, ackable=e.ackable, token=token,
-                          account=dict(acc), meta=meta)
+                          account=dict(acc), meta=meta, book_gap=book_gap,
+                          last_to=last["period_to"] if last else None)
         except Exception as e:  # unreadable file etc.
             shutil.rmtree(folder, ignore_errors=True)
             return redirect("/reconcile", ("error", f"Could not process the files: {e}"), request)
@@ -512,11 +590,15 @@ def _finish_upload(request, token, meta, acknowledged=False, reason=""):
 
 @app.post("/reconcile")
 def reconcile(request: Request, account_id: int = Form(...), bank_file: UploadFile = File(...),
-              book_file: UploadFile = File(...), csrf_token: str = Form("")):
+              book_file: UploadFile = File(...), backdated_file: UploadFile | None = File(None),
+              confirm_backdated: str = Form(""), csrf_token: str = Form("")):
     if (g := guard(request, "reconcile")):
         return g
     if not check_csrf(request, csrf_token):
         return redirect("/reconcile", ("error", "Session expired, try again."), request)
+    if confirm_backdated != "1":
+        return redirect("/reconcile", ("error", "Please confirm that all back-dated entries are posted and that there "
+                                                "will be no more back-dated entries after downloading the report."), request)
     _cleanup_staging()
     token = secrets.token_hex(12)
     folder = STAGING / token
@@ -524,12 +606,39 @@ def reconcile(request: Request, account_id: int = Form(...), bank_file: UploadFi
     try:
         bpath, bname = _stage(bank_file, folder)
         kpath, kname = _stage(book_file, folder)
+        dpath, dname = (_stage(backdated_file, folder) if backdated_file is not None and backdated_file.filename
+                        else (None, ""))
     except ValueError as e:
         shutil.rmtree(folder, ignore_errors=True)
         return redirect("/reconcile", ("error", str(e)), request)
     meta = {"account_id": account_id, "bank_path": str(bpath), "bank_name": bname,
-            "book_path": str(kpath), "book_name": kname, "user": user(request)}
+            "book_path": str(kpath), "book_name": kname, "user": user(request), "confirmed": True,
+            "backdated_path": str(dpath) if dpath else None, "backdated_name": dname}
     (folder / "meta.json").write_text(json.dumps(meta))
+    return _finish_upload(request, token, meta)
+
+
+@app.post("/reconcile/backdated")
+def reconcile_backdated(request: Request, token: str = Form(...), backdated_file: UploadFile = File(...),
+                        csrf_token: str = Form("")):
+    """Stop page → attach a fresh bank book of the earlier day(s) to find back-dated entries, then re-run."""
+    if (g := guard(request, "reconcile")):
+        return g
+    if not check_csrf(request, csrf_token) or not token.isalnum():
+        return redirect("/reconcile", ("error", "Session expired, upload again."), request)
+    folder = STAGING / token
+    mp = folder / "meta.json"
+    if not mp.exists():
+        return redirect("/reconcile", ("error", "Upload expired (1 hour). Please upload again."), request)
+    meta = json.loads(mp.read_text())
+    if meta.get("user") != user(request):
+        return redirect("/reconcile", ("error", "Upload belongs to another session."), request)
+    try:
+        dpath, dname = _stage(backdated_file, folder)
+    except ValueError as e:
+        return redirect("/reconcile", ("error", str(e)), request)
+    meta.update(backdated_path=str(dpath), backdated_name=dname)
+    mp.write_text(json.dumps(meta))
     return _finish_upload(request, token, meta)
 
 

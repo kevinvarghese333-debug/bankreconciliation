@@ -1,10 +1,7 @@
 {% extends "base.html" %}
+{% from "_icons.html" import icon %}
+{% block title %}Dashboard · Bank Reco{% endblock %}
 {% block content %}
-{% set mains = accounts | selectattr("kind", "equalto", "main") | list %}
-{% set colls = accounts | selectattr("kind", "equalto", "collection") | list %}
-{% set done = accounts | selectattr("last") | list %}
-{% set untallied = done | rejectattr("brs.clean") | list %}
-{% set crit = done | sum(attribute="summary.severity.critical") if done else 0 %}
 <div class="pagehead">
   <div><h1>Dashboard</h1><div class="muted">{{ now().strftime("%A, %d %B %Y") }}</div></div>
   {% if can('reconcile') %}<div class="actions"><a class="btn primary" href="{{ base }}/reconcile">+ New reconciliation</a></div>{% endif %}
@@ -13,15 +10,54 @@
 {% if not accounts %}
 <div class="panel empty">No bank accounts yet. <a href="{{ base }}/accounts">Add your accounts</a> to begin.</div>
 {% else %}
-<div class="grid cards">
-  <div class="card"><div class="label">Accounts</div><div class="value">{{ accounts|length }}</div><div class="sub">{{ mains|length }} main · {{ colls|length }} collection</div></div>
-  <div class="card {{ 'good' if done and not untallied else ('bad' if untallied else '') }}"><div class="label">BRS status</div><div class="value">{{ done|length - untallied|length }} / {{ done|length }}</div><div class="sub">latest runs tallied</div></div>
-  <div class="card {{ 'bad' if crit else '' }}"><div class="label">Critical exceptions</div><div class="value">{{ crit }}</div><div class="sub">in latest runs</div></div>
-  <div class="card"><div class="label">Open items</div><div class="value">{{ done | sum(attribute="open_count") }}</div><div class="sub">carried to next day</div></div>
+
+<div class="panel">
+  <div class="panelhead"><h2 style="margin:0"><span class="hicon">{{ icon('check', 18) }}</span>Things to do</h2></div>
+  <div class="todo">
+    <a href="{{ base }}/reconcile" class="{{ 'done' if not st.pending }}">
+      <span class="ti">{{ icon('reconcile', 26) }}</span>
+      <span><span class="tt">Reconcile</span><br><span class="ts">{% if st.pending %}{{ st.pending|length }} account(s) not done up to {{ st.yday | dmy }}{% else %}All accounts up to date{% endif %}</span></span>
+      <span class="chev">{{ icon('chev', 18) }}</span>
+    </a>
+    <a href="{% if st.unreviewed_run %}{{ base }}/runs/{{ st.unreviewed_run }}#flags{% else %}{{ base }}/history{% endif %}" class="{{ 'alert' if st.crit else ('done' if not st.unreviewed else '') }}">
+      <span class="ti">{{ icon('alert', 26) }}</span>
+      <span><span class="tt">Review exceptions</span><br><span class="ts">{% if st.unreviewed %}{{ st.unreviewed }} critical / high not yet reviewed{% else %}Nothing waiting{% endif %}</span></span>
+      <span class="chev">{{ icon('chev', 18) }}</span>
+    </a>
+    <a href="{{ base }}/history" class="{{ 'done' if not st.unsigned }}">
+      <span class="ti">{{ icon('sign', 26) }}</span>
+      <span><span class="tt">Sign off</span><br><span class="ts">{% if st.unsigned %}{{ st.unsigned|length }} latest run(s) not checked{% else %}All latest runs checked{% endif %}</span></span>
+      <span class="chev">{{ icon('chev', 18) }}</span>
+    </a>
+    <a href="{{ base }}/open-items" class="{{ 'done' if not st.open }}">
+      <span class="ti">{{ icon('clock', 26) }}</span>
+      <span><span class="tt">Open items</span><br><span class="ts">{% if st.open %}{{ st.open }} open{% if st.oldest %}, oldest {{ st.oldest | dmy }}{% endif %}{% else %}Every line matched{% endif %}</span></span>
+      <span class="chev">{{ icon('chev', 18) }}</span>
+    </a>
+  </div>
 </div>
 
+<div class="section-title">Reconciliation metrics</div>
+<div class="panel tight metricrows">
+  <div class="panelhead" style="padding:16px 20px 4px"><h2 style="margin:0"><span class="hicon">{{ icon('dashboard', 18) }}</span>Status of latest runs</h2><span class="muted small">as of {{ now().strftime("%d %b %Y") }}</span></div>
+  <div class="metrics">
+    <div class="metric"><div class="ml">Accounts</div><div class="mv">{{ st.accounts }}</div></div>
+    <div class="metric"><div class="ml">Up to date</div><div class="mv {{ 'ok' if not st.pending }}">{{ st.accounts - st.pending|length }}</div></div>
+    <div class="metric"><div class="ml">Pending</div><div class="mv {{ 'bad' if st.pending }}">{{ st.pending|length }}</div></div>
+    <div class="metric"><div class="ml">BRS tallied</div><div class="mv">{{ st.tallied }}</div></div>
+    <div class="metric"><div class="ml">Not tallied</div><div class="mv {{ 'bad' if st.untallied }}">{{ st.untallied|length }}</div></div>
+  </div>
+  <div class="metrics">
+    <div class="metric"><div class="ml">Critical</div><div class="mv {{ 'bad' if st.crit }}">{{ st.crit }}</div></div>
+    <div class="metric"><div class="ml">High</div><div class="mv">{{ st.high }}</div></div>
+    <div class="metric"><div class="ml">Unreviewed</div><div class="mv">{{ st.unreviewed }}</div></div>
+    <div class="metric"><div class="ml">Awaiting sign-off</div><div class="mv">{{ st.unsigned|length }}</div></div>
+    <div class="metric"><div class="ml">Open items</div><div class="mv">{{ st.open }}</div></div>
+  </div>
+</div>
+
+<div class="section-title">Accounts</div>
 <div class="panel tight">
-  <div class="panelhead"><h2 style="margin:0">Accounts</h2></div>
   <div class="scroll">
   <table>
     <thead><tr><th>Account</th><th>Type</th><th>Reconciled up to</th><th>BRS</th><th class="num">Exceptions</th><th class="num">Open items</th><th class="num">Oldest open</th><th></th></tr></thead>
@@ -29,9 +65,9 @@
     {% for a in accounts if a.active %}
       <tr>
         <td><strong>{{ a.nickname }}</strong><div class="faint small">{{ a.bank }} · …{{ a.acc_no[-4:] }}{% if a.branch %} · {{ a.branch }}{% endif %}</div></td>
-        <td><span class="pill {{ 'info' if a.kind == 'main' else 'neutral' }}">{{ 'Main' if a.kind == 'main' else 'Collection' }}</span></td>
+        <td><span class="pill {{ 'gold' if a.kind == 'main' else 'neutral' }}">{{ 'Main' if a.kind == 'main' else 'Collection' }}</span></td>
         {% if a.last %}
-          <td><a href="{{ base }}/runs/{{ a.last.id }}">{{ a.last.period_to | dmy }}</a></td>
+          <td><a href="{{ base }}/runs/{{ a.last.id }}">{{ a.last.period_to | dmy }}</a>{% if a.last.period_to < st.yday %} <span class="pill review">behind</span>{% endif %}</td>
           <td>{% if a.brs.clean %}<span class="statusdot ok"></span>Tallied{% elif a.brs.tallies %}<span class="statusdot bad"></span><span style="color:var(--bad)">Unexplained ₹{{ a.brs.opening_diff | inr }}</span>{% else %}<span class="statusdot bad"></span><span style="color:var(--bad)">Diff ₹{{ a.brs.difference | inr }}</span>{% endif %}</td>
           <td class="num">
             {% set sv = a.summary.severity %}
@@ -44,7 +80,7 @@
         {% else %}
           <td class="faint" colspan="5"><span class="statusdot none"></span>Not reconciled yet</td>
         {% endif %}
-        <td class="num nowrap">{% if a.last %}<a class="btn small" href="{{ base }}/runs/{{ a.last.id }}">View</a> {% endif %}<a class="btn small" href="{{ base }}/reconcile?account={{ a.id }}">Reconcile</a></td>
+        <td class="num nowrap">{% if a.last %}<a class="btn small" href="{{ base }}/runs/{{ a.last.id }}">View</a> {% endif %}{% if can('reconcile') %}<a class="btn small" href="{{ base }}/reconcile?account={{ a.id }}">Reconcile</a>{% endif %}</td>
       </tr>
     {% endfor %}
     </tbody>
@@ -53,10 +89,10 @@
 </div>
 
 {% if recent %}
+<div class="section-title">Recent runs</div>
 <div class="panel tight">
-  <div class="panelhead"><h2 style="margin:0">Recent runs</h2><a href="{{ base }}/history" class="small">All history →</a></div>
   <table>
-    <thead><tr><th>Run</th><th>Account</th><th>Date</th><th>BRS</th><th class="num">Payments matched</th><th class="num">Collections matched</th><th>By</th></tr></thead>
+    <thead><tr><th>Run</th><th>Account</th><th>Date</th><th>BRS</th><th class="num">Payments matched</th><th class="num">Collections matched</th><th>Checked</th><th>By</th></tr></thead>
     <tbody>
     {% for r in recent %}
       <tr>
@@ -66,11 +102,13 @@
         <td>{% if r.brs.clean %}<span class="pill ok">Tallied</span>{% elif r.brs.tallies %}<span class="pill bad">Unexplained diff</span>{% else %}<span class="pill bad">Not tallied</span>{% endif %}</td>
         <td class="num">{{ r.summary.bank_out.matched }} / {{ r.summary.bank_out.count }}</td>
         <td class="num">{{ r.summary.bank_in.matched }} / {{ r.summary.bank_in.count }}</td>
+        <td>{% if r.checked_by %}<span class="pill ok">{{ r.checked_by }}</span>{% else %}<span class="faint">—</span>{% endif %}</td>
         <td class="muted small">{{ r.created_by }} · {{ r.created_at[:16] }}</td>
       </tr>
     {% endfor %}
     </tbody>
   </table>
+  <div style="padding:12px 20px"><a href="{{ base }}/history" class="small">All history →</a></div>
 </div>
 {% endif %}
 {% endif %}

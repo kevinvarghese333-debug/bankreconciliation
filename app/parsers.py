@@ -80,7 +80,19 @@ def read_sheet(path: str | Path) -> pd.DataFrame:
     """Read the first sheet of .xls / .xlsx / .csv with no header inference."""
     p = str(path).lower()
     if p.endswith(".csv"):
-        return pd.read_csv(path, header=None, dtype=object)
+        # Bank CSVs (ICICI) carry a title line, blank lines and a footer: rows of different widths
+        import csv
+        raw = Path(path).read_bytes()
+        for enc in ("utf-8-sig", "cp1252", "latin-1"):
+            try:
+                text = raw.decode(enc)
+                break
+            except UnicodeDecodeError:
+                continue
+        rows = list(csv.reader(text.splitlines()))
+        width = max((len(r) for r in rows), default=0)
+        rows = [[(c.strip() if c.strip() != "" else None) for c in r] + [None] * (width - len(r)) for r in rows]
+        return pd.DataFrame(rows, dtype=object)
     if p.endswith(".xls"):
         try:
             return pd.read_excel(path, header=None, dtype=object, engine="xlrd")
@@ -199,8 +211,14 @@ def parse_narration(text: str) -> dict:
         return out
     if head == "RAP" and len(parts) >= 4:
         out.update(channel="RAP", ref=parts[1], seq=parts[2].lstrip("0"), name=parts[3])
+    elif head == "UPI" and len(parts) >= 3 and re.fullmatch(r"\d{10,}", parts[1] or ""):
+        # ICICI: UPI/<utr>/<note>/<masked vpa>/<payer bank>/<txn id> — no payer name
+        out.update(channel="UPI", ref=parts[1], name="")
     elif head == "UPI" and len(parts) >= 4:
         out.update(channel="UPI", ref=parts[2], name=parts[3])
+    elif re.search(r"\bNACH\d*", up):
+        m = re.search(r"(NACH\d*)", up)
+        out.update(channel="NACH", ref=m.group(1), name="")
     elif head in ("NEFT", "IMPS", "RTGS", "MMT", "INF", "INFT", "NFT"):
         out["channel"] = head
         m = UTR_RE.search(t) or re.search(r"([A-Z]{4}[A-Z0-9]{8,})", t)
@@ -222,9 +240,9 @@ def parse_narration(text: str) -> dict:
 def parse_bank_statement(path: str | Path) -> dict:
     checks: list[dict] = []
     df = read_sheet(path)
-    hdr = _find_header(df, [["particulars", "narration", "description", "remarks", "transactiondetails"],
-                            ["balance", "balanceamount", "closingbalance"],
-                            ["withdrawal", "withdrawals", "debit", "dr", "withdrawalamt"]])
+    hdr = _find_header(df, [["particulars", "narration", "description", "remarks", "transactiondetails", "tranparticular"],
+                            ["balance", "balanceamount", "closingbalance", "balamt"],
+                            ["withdrawal", "withdrawals", "debit", "dr", "withdrawalamt", "drtranamt"]])
     if hdr is None:
         return {"ok": False, "checks": [check("error", "BANK_HEADER",
                 "Could not find the column header row (Particulars / Withdrawals / Deposits / Balance) "
@@ -232,11 +250,11 @@ def parse_bank_statement(path: str | Path) -> dict:
     header = [norm(c) if not pd.isna(c) else "" for c in df.iloc[hdr].tolist()]
     c_date = _col(header, ["transactiondate", "txndate", "trandate", "date", "postdate"])
     c_vdate = _col(header, ["valuedate", "valuedt"])
-    c_narr = _col(header, ["particulars", "narration", "description", "remarks", "transactiondetails"])
-    c_chq = _col(header, ["chequenumber", "chequeno", "chqno", "chq", "refno", "cheque"])
-    c_wd = _col(header, ["withdrawals", "withdrawal", "withdrawalamt", "debit", "dr"])
-    c_dp = _col(header, ["deposits", "deposit", "depositamt", "credit", "cr"])
-    c_bal = _col(header, ["balanceamount", "balance", "closingbalance"])
+    c_narr = _col(header, ["particulars", "narration", "description", "transactiondetails", "tranparticular", "remarks"])
+    c_chq = _col(header, ["chequenumber", "chequeno", "chqno", "chq", "refno", "cheque", "instnum"])
+    c_wd = _col(header, ["withdrawals", "withdrawal", "withdrawalamt", "debit", "dr", "drtranamt"])
+    c_dp = _col(header, ["deposits", "deposit", "depositamt", "credit", "cr", "crtranamt"])
+    c_bal = _col(header, ["balanceamount", "balance", "closingbalance", "balamt"])
     c_sl = _col(header, ["slno", "srno", "sno", "serialno"])
     missing = [n for n, c in [("date", c_date), ("narration", c_narr), ("withdrawals", c_wd),
                               ("deposits", c_dp), ("balance", c_bal)] if c is None]
@@ -253,8 +271,19 @@ def parse_bank_statement(path: str | Path) -> dict:
             acc_no = m.group(1)
             break
 
+    if not acc_no:
+        for i in range(hdr + 1, min(hdr + 6, len(df))):
+            for c in df.iloc[i].tolist():
+                m = re.match(r"^\s*a/?c\s*no\.?\s*:?\s*([0-9Xx*]{6,})\s*$", str(c or ""), re.I)
+                if m:
+                    acc_no = m.group(1)
+                    break
+            if acc_no:
+                break
+
     rows = []
     bad_rows = []
+    brought_forward = None   # ICICI "B/F" line: the opening balance printed by the bank
     grand = None          # the statement's own "Grand Total" row, when it prints one
     footer = 0
     for i in range(hdr + 1, len(df)):
@@ -276,10 +305,15 @@ def parse_bank_statement(path: str | Path) -> dict:
         if (pd.isna(raw_date) or str(raw_date).strip() == "") and not narr:
             if "end of" in low or not joined.strip():
                 continue
+        if narr.upper() in ("B/F", "BALANCE B/F", "OPENING BALANCE", "BROUGHT FORWARD"):
+            try:
+                brought_forward = to_amount(r[c_bal])
+            except ValueError:
+                bad_rows.append(i + 1)
+            continue
         d = to_date(raw_date)
         if d is None:
-            has_amount = any(not pd.isna(r[c]) and str(r[c]).strip() not in ("", "0", "0.00")
-                             for c in (c_wd, c_dp))
+            has_amount = any(not pd.isna(r[c]) and re.search(r"[1-9]", str(r[c])) for c in (c_wd, c_dp))
             if not has_amount:
                 # a line of text with no money on it (bank's notes, page footer): nothing to reconcile
                 footer += bool(joined.strip())
@@ -369,6 +403,13 @@ def parse_bank_statement(path: str | Path) -> dict:
     closing = rows[-1]["balance"]
     tot_wd = round(sum(r["withdrawal"] for r in rows), 2)
     tot_dp = round(sum(r["deposit"] for r in rows), 2)
+    if brought_forward is not None:
+        if abs(brought_forward - opening) > TOL:
+            checks.append(check("error", "BANK_BF",
+                                f"Opening balance printed by the bank (B/F) {inr(brought_forward)} ≠ first row's opening "
+                                f"{inr(opening)}. Rows may be missing at the start."))
+        else:
+            checks.append(check("ok", "BANK_BF", f"Opening balance B/F {inr(brought_forward)} agrees with the first row."))
     if grand:
         diffs = [f"{label}: statement total {inr(g)}, transactions add up to {inr(c)}"
                  for label, g, c in (("withdrawals", grand["withdrawal"], tot_wd), ("deposits", grand["deposit"], tot_dp),

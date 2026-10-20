@@ -12,9 +12,9 @@ LABELS = {
 
 DESCRIPTIONS = {
     "viewer": "Read-only: dashboard, runs, open items, history; download Excel.",
-    "operator": "Everything a Viewer can, plus upload and reconcile, manual match, and notes.",
+    "operator": "Everything a Viewer can, plus upload and reconcile, manual match, notes, reviews, and adding or removing holidays.",
     "manager": "Everything an Operator can, plus acknowledge warnings, unmatch, undo the latest run, "
-               "sign off runs as checked, edit holidays, and view the audit log.",
+               "sign off runs as checked, and view the audit log.",
     "admin": "Everything, plus the Admin portal: users and roles, revoking reconciled days, and bank accounts.",
 }
 
@@ -28,7 +28,7 @@ PERMS = {
     "unmatch": "manager",
     "undo": "manager",
     "signoff": "manager",
-    "holidays": "manager",
+    "holidays": "operator",
     "audit": "manager",
     "accounts": "admin",
     "admin": "admin",

@@ -11,9 +11,11 @@ def write_statement(path, d: date, opening: float, txns: list[tuple]):
     ws.append(["SlNo", "Transaction Date", "Value Date", "Particulars", None, "Cheque Number",
                "Withdrawals", None, "Deposits", "Balance Amount"])
     bal = opening
-    for n, (narr, wd, dp) in enumerate(txns, 1):
+    for n, t in enumerate(txns, 1):
+        narr, wd, dp = t[:3]
+        dd = t[3] if len(t) > 3 else d
         bal = round(bal - wd + dp, 2)
-        ws.append([n, d.strftime("%d-%m-%Y"), d.strftime("%d-%m-%Y"), narr, None, None,
+        ws.append([n, dd.strftime("%d-%m-%Y"), dd.strftime("%d-%m-%Y"), narr, None, None,
                    f"{wd:,.2f}" if wd else None, None, f"{dp:,.2f}" if dp else None, f"{bal:,.2f}"])
     ws.append([None, None, None, None, "****End of A/c Statement****"])
     wb.save(path)

@@ -1,0 +1,31 @@
+{% extends "base.html" %}
+{% block title %}Search · Bank Reco{% endblock %}
+{% block content %}
+<div class="pagehead"><div><h1>Search</h1>
+  <div class="muted">{% if q|length < 3 %}Type at least 3 characters: a customer name, UTR or reference, voucher number, or an amount.{% else %}{{ rows|length }}{% if rows|length == 200 %}+{% endif %} result(s) for “{{ q }}” across all accounts and days{% endif %}</div></div></div>
+{% if rows %}
+<div class="panel tight">
+  <div class="scroll" style="max-height:none">
+  <table>
+    <thead><tr><th>Date</th><th>Account</th><th>Side</th><th>Name</th><th>Reference / Vchr</th><th class="num">Amount</th><th>Status</th><th></th></tr></thead>
+    <tbody>
+    {% for it in rows %}
+      <tr>
+        <td class="nowrap">{{ it.date | dmy }}</td>
+        <td>{{ it.nickname }} <span class="faint small">…{{ it.acc_no[-4:] }}</span></td>
+        <td class="side">{{ it.side }}</td>
+        <td><strong>{{ it.name or '—' }}</strong><div class="faint small" style="max-width:420px">{{ (it.narration or it.text or '')[:90] }}</div></td>
+        <td class="mono">{{ it.ref or '' }}{% if it.vno %}{{ ' · ' if it.ref }}Vchr {{ it.vno }}{% endif %}</td>
+        <td class="num">{{ ('−' if it.dir == 'out' else '') }}{{ it.amount | inr }}</td>
+        <td>{% if it.match_id %}<span class="pill {{ 'ok' if it.confidence == 'strong' else ('manual' if it.confidence == 'manual' else 'review') }}">{{ {'strong':'Matched','review':'Verify','manual':'Manual'}.get(it.confidence, 'Matched') }}</span>{% else %}<span class="pill critical">Open</span>{% endif %}</td>
+        <td><a class="btn small" href="{{ base }}/runs/{{ it.run_id }}">View day</a></td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  </div>
+</div>
+{% elif q|length >= 3 %}
+<div class="panel empty">Nothing found for “{{ q }}”.</div>
+{% endif %}
+{% endblock %}

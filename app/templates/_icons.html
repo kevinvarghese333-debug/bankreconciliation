@@ -1,0 +1,23 @@
+{% macro icon(name, size=20) -%}
+<svg class="ico" width="{{ size }}" height="{{ size }}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+{%- if name == 'dashboard' -%}<path d="M12 3a9 9 0 1 0 9 9h-9z"/><path d="M15 3.5A9 9 0 0 1 20.5 9H15z"/>
+{%- elif name == 'reconcile' -%}<path d="M4 7h11"/><path d="m12 4 3 3-3 3"/><path d="M20 17H9"/><path d="m12 14-3 3 3 3"/>
+{%- elif name == 'open' -%}<rect x="4" y="4" width="16" height="16" rx="3"/><path d="M8 9h8M8 13h5"/>
+{%- elif name == 'history' -%}<path d="M3.5 12a8.5 8.5 0 1 0 2.6-6.1"/><path d="M3 4v4h4"/><path d="M12 8v4l3 2"/>
+{%- elif name == 'accounts' -%}<path d="M3 10 12 4l9 6"/><path d="M5 10v8M9.5 10v8M14.5 10v8M19 10v8"/><path d="M3 20h18"/>
+{%- elif name == 'holidays' -%}<rect x="3.5" y="5" width="17" height="15" rx="2.5"/><path d="M3.5 10h17M8 3v4M16 3v4"/>
+{%- elif name == 'audit' -%}<path d="M7 3h7l4 4v14H7z"/><path d="M14 3v4h4"/><path d="M10 12h5M10 16h5"/>
+{%- elif name == 'admin' -%}<path d="M12 3 4.5 6v5.5c0 4.4 3.1 8.2 7.5 9.5 4.4-1.3 7.5-5.1 7.5-9.5V6z"/><path d="m9 12 2 2 4-4"/>
+{%- elif name == 'search' -%}<circle cx="11" cy="11" r="6.5"/><path d="m20 20-4.2-4.2"/>
+{%- elif name == 'user' -%}<circle cx="12" cy="8.5" r="3.5"/><path d="M5 20c1.2-3.6 4-5.5 7-5.5s5.8 1.9 7 5.5"/>
+{%- elif name == 'logout' -%}<path d="M15 4h3a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2h-3"/><path d="M10 16l-4-4 4-4M6 12h10"/>
+{%- elif name == 'chev' -%}<path d="m9 6 6 6-6 6"/>
+{%- elif name == 'info' -%}<circle cx="12" cy="12" r="8.5"/><path d="M12 11v5M12 8h.01"/>
+{%- elif name == 'alert' -%}<path d="M12 4 2.8 19.5h18.4z"/><path d="M12 10v4M12 17h.01"/>
+{%- elif name == 'check' -%}<circle cx="12" cy="12" r="8.5"/><path d="m8.5 12 2.5 2.5 4.5-5"/>
+{%- elif name == 'clock' -%}<circle cx="12" cy="12" r="8.5"/><path d="M12 7.5V12l3 2"/>
+{%- elif name == 'sign' -%}<path d="M4 20h16"/><path d="m14.5 5.5 4 4L9 19H5v-4z"/>
+{%- elif name == 'menu' -%}<path d="M4 7h16M4 12h16M4 17h16"/>
+{%- endif -%}
+</svg>
+{%- endmacro %}

@@ -100,8 +100,8 @@ The first login created at setup is an **Admin**. The Admin portal is at **/bank
 | Role | Can do |
 |---|---|
 | Viewer | Read everything and download Excel |
-| Operator | + upload and reconcile, manual match, notes |
-| Manager | + acknowledge warnings, unmatch, undo the latest run, sign off runs as checked, holidays, audit log |
+| Operator | + upload and reconcile, manual match, notes, reviews, add/remove holidays |
+| Manager | + acknowledge warnings, unmatch, undo the latest run, sign off runs as checked, audit log |
 | Admin | + users and roles, revoke reconciled days, bank accounts |
 
 - **Users:** create a user with a temporary password; they must set their own at first sign-in. Changing a role,
@@ -134,6 +134,30 @@ It is marked *Renewal — net settled* and flagged Medium to verify, or High if 
 
 Branch names are matched even when shortened or split (Kanichu / Kanichu Kulangara = Kanichukulangara), but only
 when the short form fits one branch alone.
+
+### ICICI collection account
+
+The ICICI account (…0993) collects NACH and dynamic-UPI payments all day, and its balance is transferred to SIB
+…1113 from time to time. Upload the ICICI **.csv** statement download as the bank statement, with the ERP bank book
+of the ICICI ledger. The app reads:
+- the B/F line as the opening balance, and checks it against the first transaction;
+- the account number on each row, and checks it against the account you chose;
+- the UTR from each UPI line, for matching against the last 4 digits in Instrument.Det;
+- NACH settlement lines (e.g. `TPSL-…-NACH5705`).
+
+### Late-night lines dated the next day
+
+SIB and ICICI statements often end with a line just after midnight that is dated the next day. That line is left out
+of the day being reconciled, and the day closes on the balance before it. The next day picks it up from that day's
+statement or, if the statement doesn't repeat it, from the previous file.
+
+### Back-dated ERP entries
+
+Before reconciling, the operator confirms that all back-dated entries are posted. If the bank book still opens at a
+different balance than the app closed the previous day with, the run stops and offers **Find the back-dated
+entries**. Attach a fresh bank book export from the earliest day that may have changed up to the last reconciled day.
+The app lists every voucher posted, changed or deleted since. If those explain the whole gap, the run continues
+with them included, flagged High.
 
 ## 5. How matching works
 

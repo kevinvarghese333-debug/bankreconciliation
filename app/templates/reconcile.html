@@ -23,7 +23,7 @@
     <div class="drop" id="d1">
       <input type="file" name="bank_file" accept=".xls,.xlsx,.csv" required>
       <div class="t">1 · Bank statement</div>
-      <div class="muted small">SIB "OpTransactionHistory" .xls from net banking</div>
+      <div class="muted small">SIB .xls from net banking, or the ICICI .csv download</div>
       <div class="f"></div>
     </div>
     <div class="drop" id="d2">
@@ -33,6 +33,21 @@
       <div class="f"></div>
     </div>
   </div>
+  <details style="margin-top:14px">
+    <summary class="small">Back-dated entries were posted for an earlier day? Add a fresh bank book (optional)</summary>
+    <div class="drop" style="margin-top:10px;max-width:520px">
+      <input type="file" name="backdated_file" accept=".xls,.xlsx,.csv">
+      <div class="t">3 · Re-downloaded bank book for earlier day(s)</div>
+      <div class="muted small">Same ledger, from the day the back-dated entries belong to, up to the last reconciled day.
+        The app finds every voucher posted, changed or deleted since that day was reconciled.</div>
+      <div class="f"></div>
+    </div>
+  </details>
+  <label class="confirm">
+    <input type="checkbox" name="confirm_backdated" value="1" required>
+    <span><strong>Are all the back-dated entries posted and updated?</strong> I confirm there will be no more back-dated
+      entries after downloading this report.</span>
+  </label>
   <div style="margin-top:18px;display:flex;gap:12px;align-items:center">
     <button class="btn primary" id="go">Reconcile</button>
     <span class="muted small" id="busy" style="display:none">Checking and matching…</span>

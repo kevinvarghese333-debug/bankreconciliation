@@ -171,6 +171,7 @@ MIGRATIONS = [
     ("runs", "checked_by", "TEXT DEFAULT ''"),
     ("runs", "checked_at", "TEXT DEFAULT ''"),
     ("runs", "checked_note", "TEXT DEFAULT ''"),
+    ("runs", "deferred_json", "TEXT DEFAULT ''"),     # late-night bank lines dated the next day, left out of this run
 ]
 
 

@@ -607,6 +607,10 @@ def build_flags(bank: list[dict], book: list[dict], matches: list[dict], account
             continue
         direction = items[0]["dir"]
         amt = sum(byk[x]["amount"] for x in m["bank"] if x in byk)
+        if m["method"].startswith("Voucher deleted"):
+            f("high", "BOOK_VOUCHER_REMOVED", "Voucher deleted or changed in the ERP after its day was reconciled",
+              m["note"] + ". Find out who changed it and why.", [*m["bank"], *m["book"]])
+            continue
         if m["method"].startswith("Renewal"):
             f("high" if "(ambiguous)" in m["method"] else "medium", "RENEWAL_NETTED",
               "Loan renewal settled net — verify",
@@ -654,6 +658,16 @@ def build_flags(bank: list[dict], book: list[dict], matches: list[dict], account
           f"and back-dated. Receipts ₹{inr(rc)}, payments ₹{inr(pm)}: "
           + ", ".join(f"Vchr {k['vno']} {k['name']}" for k in ks[:8]) + ". Check who posted them and when.",
           [k["key"] for k in ks])
+
+    # vouchers posted in the ERP after their day was already reconciled (found by the back-dated check)
+    late = [k for k in book if k.get("backdated") and not k.get("carried")]
+    if late:
+        f("high", "BOOK_BACKDATED_POSTED",
+          f"{len(late)} voucher(s) posted in the ERP after their day was reconciled",
+          f"₹{inr(sum(k['amount'] for k in late))} dated on or before {late[0].get('posted_after') or 'an earlier day'}: "
+          + ", ".join(f"Vchr {k['vno']} {k['date']:%d-%m} {k['name'] or k.get('narration', '')[:25]} ₹{inr(k['amount'])}"
+                      for k in late[:8])
+          + ". Branches should post entries on the day; check who back-dated them.", [k["key"] for k in late])
 
     # how receipts that arrived on a holiday were booked: the ERP instrument date should be the bank date
     hol_in = []

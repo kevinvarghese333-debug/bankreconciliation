@@ -1,37 +1,61 @@
 <!doctype html>
+{% from "_icons.html" import icon %}
 <html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{% block title %}Bank Reconciliation{% endblock %}</title>
 <link rel="stylesheet" href="{{ base }}/static/style.css">
-<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='7' fill='%231f3a5f'/><text x='16' y='22' font-size='16' text-anchor='middle' fill='white' font-family='Arial' font-weight='bold'>₹</text></svg>">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='8' fill='%231B2E4F'/><text x='16' y='21.5' font-size='13' text-anchor='middle' fill='%23D9B26A' font-family='Georgia,serif' font-weight='bold'>KG</text></svg>">
 </head>
 <body>
 {% if user %}
-<header class="topbar"><div class="inner">
-  <a class="brand" href="{{ base }}/"><span class="mark">₹</span> Bank Reco</a>
-  {% set p = request.url.path[base|length:] or '/' %}
-  <nav class="nav">
-    <a href="{{ base }}/" class="{{ 'on' if p == '/' }}">Dashboard</a>
-    {% if can('reconcile') %}<a href="{{ base }}/reconcile" class="{{ 'on' if p.startswith('/reconcile') }}">New reconciliation</a>{% endif %}
-    <a href="{{ base }}/open-items" class="{{ 'on' if p.startswith('/open-items') }}">Open items</a>
-    <a href="{{ base }}/history" class="{{ 'on' if p.startswith('/history') or p.startswith('/runs') }}">History</a>
-    <a href="{{ base }}/accounts" class="{{ 'on' if p.startswith('/accounts') }}">Accounts</a>
-    <a href="{{ base }}/holidays" class="{{ 'on' if p.startswith('/holidays') }}">Holidays</a>
-    {% if can('audit') %}<a href="{{ base }}/audit" class="{{ 'on' if p.startswith('/audit') }}">Audit log</a>{% endif %}
-    {% if can('admin') %}<a href="{{ base }}/admin" class="{{ 'on' if p.startswith('/admin') }}" style="color:#f5c542">Admin</a>{% endif %}
-  </nav>
-  <form class="who" method="post" action="{{ base }}/logout">
-    <a href="{{ base }}/me" style="color:inherit;text-decoration:none" title="My account">{{ full_name or user }} <span style="opacity:.7;font-size:12px">· {{ role_label }}</span></a>
-    <input type="hidden" name="csrf_token" value="{{ csrf }}">
-    <button type="submit">Log out</button>
-  </form>
-</div></header>
-<main>
-  {% if flash %}<div class="flash {{ flash.kind }}">{{ flash.msg }}</div>{% endif %}
-  {% block content %}{% endblock %}
-</main>
+{% set p = request.url.path[base|length:] or '/' %}
+<div class="shell">
+  <aside class="sidebar" id="side">
+    <a class="org" href="{{ base }}/">
+      <span class="logo">KG</span>
+      <span class="orgtext"><span class="orgname">Kavitha Group</span><span class="orgsub">Bank Reconciliation</span></span>
+    </a>
+    <nav class="sidenav">
+      <a href="{{ base }}/" class="{{ 'on' if p == '/' }}">{{ icon('dashboard') }}<span>Dashboard</span></a>
+      {% if can('reconcile') %}<a href="{{ base }}/reconcile" class="{{ 'on' if p.startswith('/reconcile') }}">{{ icon('reconcile') }}<span>New reconciliation</span></a>{% endif %}
+      <a href="{{ base }}/open-items" class="{{ 'on' if p.startswith('/open-items') }}">{{ icon('open') }}<span>Open items</span></a>
+      <a href="{{ base }}/history" class="{{ 'on' if p.startswith('/history') or p.startswith('/runs') }}">{{ icon('history') }}<span>History</span></a>
+      <a href="{{ base }}/accounts" class="{{ 'on' if p.startswith('/accounts') }}">{{ icon('accounts') }}<span>Accounts</span></a>
+      <a href="{{ base }}/holidays" class="{{ 'on' if p.startswith('/holidays') }}">{{ icon('holidays') }}<span>Holidays</span></a>
+      {% if can('audit') %}<a href="{{ base }}/audit" class="{{ 'on' if p.startswith('/audit') }}">{{ icon('audit') }}<span>Audit log</span></a>{% endif %}
+      {% if can('admin') %}<a href="{{ base }}/admin" class="{{ 'on' if p.startswith('/admin') }}">{{ icon('admin') }}<span>Admin</span><span class="tag">Admin</span></a>{% endif %}
+    </nav>
+    <div class="sidefoot">
+      <a href="{{ base }}/me" class="{{ 'on' if p.startswith('/me') }}">{{ icon('user') }}<span>My account</span></a>
+    </div>
+  </aside>
+
+  <div class="mainwrap">
+    <header class="top">
+      <button class="iconbtn menu" type="button" onclick="document.getElementById('side').classList.toggle('open')" aria-label="Menu">{{ icon('menu') }}</button>
+      <form class="search" method="get" action="{{ base }}/search" role="search">
+        {{ icon('search', 18) }}
+        <input type="text" name="q" placeholder="Search customer, UTR, amount, voucher…" value="{{ request.query_params.get('q', '') if p.startswith('/search') else '' }}" autocomplete="off">
+      </form>
+      <div class="topright">
+        <a class="userchip" href="{{ base }}/me" title="My account">
+          <span class="avatar">{{ (full_name or user)[:1] | upper }}</span>
+          <span class="uname">{{ full_name or user }}<span class="urole">{{ role_label }}</span></span>
+        </a>
+        <form method="post" action="{{ base }}/logout">
+          <input type="hidden" name="csrf_token" value="{{ csrf }}">
+          <button class="iconbtn" type="submit" title="Log out" aria-label="Log out">{{ icon('logout') }}</button>
+        </form>
+      </div>
+    </header>
+    <main>
+      {% if flash %}<div class="flash {{ flash.kind }}">{{ flash.msg }}</div>{% endif %}
+      {% block content %}{% endblock %}
+    </main>
+  </div>
+</div>
 {% else %}
   {% block auth %}{% endblock %}
 {% endif %}

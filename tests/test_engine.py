@@ -558,6 +558,8 @@ def test_users_and_roles(conn):
     assert op.get("/admin").status_code == 303                           # ...but not the admin portal
     t2 = _tok(op, "/")
     op.post("/holidays", data={"lines": "25-12-2026 Christmas", "csrf_token": t2})
+    assert conn.execute("SELECT COUNT(*) FROM holidays").fetchone()[0] == 1      # operators manage holidays
+    op.post("/holidays/delete", data={"day": "2026-12-25", "csrf_token": t2})
     assert conn.execute("SELECT COUNT(*) FROM holidays").fetchone()[0] == 0
     assert op.get("/audit").status_code == 303
     # viewer: read-only
@@ -771,3 +773,95 @@ def test_excel_bank_statement_has_customer_name(conn, tmp_path):
     assert [c.value for c in ws[1]][2:5] == ["Particulars", "Customer name", "Withdrawal"]
     names = [row[3].value for row in ws.iter_rows(min_row=2)]
     assert names[:2] == ["VIJAYKRISHNA K R", "DIVIN BIJU"]
+
+
+def test_midnight_next_day_line_left_out_and_carried(conn, tmp_path):
+    d1, d2 = date(2026, 10, 19), date(2026, 10, 20)
+    mid = ("UPI/CNRB/629356446625/SARANYA S/UPI", 0, 200, d2)
+    r1, bc, kc = _day(conn, tmp_path, 1, d1, 43530 - 300, [_upi("629259198205", "MANOHARAN K K", 300), mid],
+                      [dict(vno=1, name="MANOHARAN K K", loan_ac="1", instr="8205", receipt=300)])
+    run1 = conn.execute("SELECT * FROM runs WHERE id=?", (r1,)).fetchone()
+    assert run1["bank_close"] == 43530 and brs(conn, r1)["tallies"]
+    assert any(c["code"] == "BANK_NEXT_DAY" for c in json.loads(run1["checks_json"]))
+    assert not [i for i in engine.run_items(conn, r1) if i["side"] == "bank" and i["date"] == d2]
+    # next day's statement does NOT repeat the midnight line: it is brought in from yesterday's file
+    r2, _, _ = _day(conn, tmp_path, 2, d2, 43730, [_upi("629300000001", "ANU", 100)],
+                    [dict(vno=2, name="SARANYA S", loan_ac="2", instr="6625", receipt=200),
+                     dict(vno=3, name="ANU", loan_ac="3", instr="0001", receipt=100)], book_op=kc)
+    assert brs(conn, r2)["tallies"]
+    assert not [i for i in engine.open_items_as_of(conn, 1, r2)]
+
+
+def test_midnight_line_repeated_next_day(conn, tmp_path):
+    d1, d2 = date(2026, 10, 19), date(2026, 10, 20)
+    mid = ("UPI/CNRB/629356446625/SARANYA S/UPI", 0, 200, d2)
+    r1, bc, kc = _day(conn, tmp_path, 1, d1, 1000, [_upi("629259198205", "MANO", 300), mid],
+                      [dict(vno=1, name="MANO", loan_ac="1", instr="8205", receipt=300)])
+    r2, _, _ = _day(conn, tmp_path, 2, d2, 1300, [mid[:3]],
+                    [dict(vno=2, name="SARANYA S", loan_ac="2", instr="6625", receipt=200)], book_op=kc)
+    assert brs(conn, r2)["tallies"]
+    assert any(c["code"] == "BANK_NEXT_DAY_IN" for c in json.loads(conn.execute(
+        "SELECT checks_json FROM runs WHERE id=?", (r2,)).fetchone()[0]))
+
+
+def test_backdated_entries_found_from_fresh_book(conn, tmp_path):
+    d1, d2 = date(2026, 10, 1), date(2026, 10, 2)
+    # day 1: a big credit in the bank is not booked; a payment is booked but never debited
+    r1, bc, kc = _day(conn, tmp_path, 1, d1, 1_000_000, [("TR FROM CHERAI BRANCH 58.73.1137", 0, 1_292_382),
+                                                          _upi("626900001111", "ASHA", 100)],
+                      [dict(vno=1, name="ASHA", loan_ac="1", instr="1111", receipt=100),
+                       dict(vno=2, name="WRONG PAYEE", loan_ac="9", payment=5000)])
+    # later, in the ERP: the credit is booked dated day 1, and the wrong payment is deleted
+    fresh = tmp_path / "fresh.xlsx"
+    write_book(fresh, d1, 1_000_000, [dict(vno=1, name="ASHA", loan_ac="1", instr="1111", receipt=100),
+                                      dict(vno=7, name="", vtype="BR", receipt=1_292_382,
+                                           narration="Sweep received from Cherai")])
+    new_open = 1_000_000 + 100 + 1_292_382
+    b2, k2 = tmp_path / "b2.xlsx", tmp_path / "k2.xlsx"
+    write_statement(b2, d2, bc, [_upi("626900002222", "BINU", 200)])
+    write_book(k2, d2, new_open, [dict(vno=8, name="BINU", loan_ac="2", instr="2222", receipt=200)])
+    with pytest.raises(engine.Blocked) as e:
+        run(conn, 1, b2, k2)
+    assert any(c["code"] == "BOOK_CONTINUITY" and c["level"] == "error" for c in e.value.checks)
+    rid = engine.reconcile(conn, 1, str(b2), "b2", str(k2), "k2", "test", backdated_path=str(fresh),
+                           backdated_name="fresh.xlsx", confirmed=True)
+    b = brs(conn, rid)
+    assert b["tallies"] and b["clean"]
+    assert not engine.open_items_as_of(conn, 1, rid)          # sweep cleared by the late voucher; payment closed
+    c = codes(conn, rid)
+    assert "BOOK_BACKDATED_POSTED" in c and "BOOK_VOUCHER_REMOVED" in c
+    checks = json.loads(conn.execute("SELECT checks_json FROM runs WHERE id=?", (rid,)).fetchone()[0])
+    assert any(x["code"] == "CONFIRM_BACKDATED" and x["level"] == "ok" for x in checks)
+
+
+def test_icici_csv_statement(tmp_path):
+    from app.parsers import parse_bank_statement
+    p = tmp_path / "icici.csv"
+    p.write_text(
+        'ICICI Bank account Statement from 19-10-2026 to 19-10-2026. \n\n\n'
+        '"Account Number","Tran Date","Tran Particular","Tran Remarks","Inst Num","Orig Sol Id","Currency Code","Dr Tran Amt","Cr Tran Amt","Bal Amt","Deposit Branch"\n'
+        '"--------------","---------","---------------","--------","-------","------------","-----------","-----------","-------","---------------"\n'
+        '"Ac No:105305000993","19-OCT-2026","B/F","","","","INR","","","1000.00",""\n'
+        '"Ac No:105305000993","19-Oct-2026","UPI/665852033974/UPI/XX03-1@okaxis/State Bank Of I /AXI85","665852033974//92","","2056","INR","0.00","300.00","1300.00","RPC KOTA"\n'
+        '"Ac No:105305000993","19-Oct-2026","TPSL-19/10/2026-NACH5705-ICIC","","","0103","INR","0.00","200.00","1500.00","RPC MUMBAI"\n'
+        '"Ac No:105305000993","19-Oct-2026","TO SIB 1113 SWEEP","","","0103","INR","500.00","0.00","1000.00","RPC MUMBAI"\n'
+        '\n Closing Balance as on 20-10-2026 03:25:09 is INR.1000.00 includes Uncleared Funds of INR.0.00\n')
+    out = parse_bank_statement(p)
+    assert out["ok"], out["checks"]
+    assert out["account_no"] == "105305000993" and out["opening"] == 1000 and out["closing"] == 1000
+    r = out["rows"]
+    assert (r[0]["channel"], r[0]["ref"]) == ("UPI", "665852033974") and r[1]["channel"] == "NACH"
+    assert any(c["code"] == "BANK_BF" and c["level"] == "ok" for c in out["checks"])
+
+
+def test_reconcile_form_requires_backdated_confirmation(conn, tmp_path):
+    admin = _client_setup()
+    t = _tok(admin, "/reconcile")
+    b, k = tmp_path / "b.xlsx", tmp_path / "k.xlsx"
+    write_statement(b, date(2026, 10, 1), 1000, [_upi("626900001111", "ASHA", 100)])
+    write_book(k, date(2026, 10, 1), 1000, [dict(vno=1, name="ASHA", loan_ac="1", instr="1111", receipt=100)])
+    files = {"bank_file": ("b.xlsx", b.read_bytes()), "book_file": ("k.xlsx", k.read_bytes())}
+    r = admin.post("/reconcile", data={"account_id": "1", "csrf_token": t}, files=files)
+    assert r.status_code == 303 and conn.execute("SELECT COUNT(*) FROM runs").fetchone()[0] == 0
+    r = admin.post("/reconcile", data={"account_id": "1", "csrf_token": t, "confirm_backdated": "1"}, files=files)
+    assert r.status_code == 200 and "confirm" in r.text.lower()      # first-run confirmation page

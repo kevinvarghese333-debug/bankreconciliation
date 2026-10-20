@@ -58,7 +58,7 @@
   {% if e %}<input type="hidden" name="account_id" value="{{ e.id }}">{% endif %}
   <h2>{{ 'Edit account' if e else 'Add account' }}</h2>
   <div class="formgrid">
-    <div class="field"><label>Bank</label><input type="text" name="bank" value="{{ e.bank if e else 'South Indian Bank' }}" required></div>
+    <div class="field"><label>Bank</label><input type="text" name="bank" list="banks" value="{{ e.bank if e else 'South Indian Bank' }}" required><datalist id="banks"><option value="South Indian Bank"><option value="ICICI Bank"></datalist></div>
     <div class="field"><label>Account number</label><input type="text" name="acc_no" value="{{ e.acc_no if e else '' }}" inputmode="numeric" required placeholder="Full number, or at least last 4"></div>
     <div class="field"><label>Nickname</label><input type="text" name="nickname" value="{{ e.nickname if e else '' }}" required placeholder="e.g. SIB 1113 Main / North Paravur collection"></div>
     <div class="field"><label>Type</label>
