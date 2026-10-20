@@ -98,10 +98,17 @@
   // upload drop zones
   $$(".drop").forEach((d) => {
     const inp = $("input[type=file]", d); const f = $(".f", d);
-    inp.addEventListener("change", () => { const n = inp.files[0] ? inp.files[0].name : ""; f.textContent = n; d.classList.toggle("has", !!n); });
+    inp.addEventListener("change", () => {
+      const k = inp.files.length;
+      const n = k > 1 ? `${k} files: ${Array.from(inp.files).slice(0, 4).map((x) => x.name).join(", ")}${k > 4 ? " …" : ""}`
+                      : (k ? inp.files[0].name : "");
+      f.textContent = n; d.classList.toggle("has", !!n);
+    });
     ["dragenter", "dragover"].forEach((ev) => d.addEventListener(ev, () => d.classList.add("over")));
     ["dragleave", "drop"].forEach((ev) => d.addEventListener(ev, () => d.classList.remove("over")));
   });
+  const bform = $("#batchform");
+  if (bform) bform.addEventListener("submit", () => { $("button.primary", bform).disabled = true; $(".batchbusy", bform).style.display = ""; });
   const form = $("#recoform");
   if (form) {
     form.addEventListener("submit", () => { $("#go").disabled = true; $("#busy").style.display = ""; });

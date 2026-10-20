@@ -159,6 +159,20 @@ entries**. Attach a fresh bank book export from the earliest day that may have c
 The app lists every voucher posted, changed or deleted since. If those explain the whole gap, the run continues
 with them included, flagged High.
 
+### Many accounts at once (bulk upload)
+
+On **New reconciliation → Many accounts at once**, drop every statement and bank book for the day (or several
+days) together, then tick the back-dated entries confirmation. The app works out which account each file belongs to:
+- statements by the account number in the file or its name, or by an opening balance equal to one account's last
+  closing;
+- bank books by the branch with entries, or by an opening equal to one account's last book closing (this decides
+  between the Head Office accounts).
+
+It then pairs the files by account and date and reconciles each pair, oldest day first. The results page shows what
+was reconciled and what stopped (**Open** goes to the usual confirm or back-dated page, then back to the batch). It
+also lists any file it couldn't identify, with a drop-down to choose the account, and what is still needed per day.
+**Add more files** fills the gaps.
+
 ## 5. How matching works
 
 Amounts must agree to the paisa. Debits only match payments, and credits only match receipts.

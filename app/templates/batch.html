@@ -1,0 +1,109 @@
+{% extends "base.html" %}
+{% from "_icons.html" import icon %}
+{% block title %}Bulk upload · Bank Reco{% endblock %}
+{% block content %}
+<div class="pagehead">
+  <div><h1>Bulk upload</h1>
+    <div class="muted">{{ b.files|length }} file(s) uploaded {{ b.created }}{% if days %} · {% for d in days %}{{ d | dmy }}{% if not loop.last %}, {% endif %}{% endfor %}{% endif %}</div></div>
+  <div class="actions">
+    <form method="post" action="{{ base }}/reconcile/batch/{{ b.id }}/run"><input type="hidden" name="csrf_token" value="{{ csrf }}"><button class="btn">Run remaining again</button></form>
+  </div>
+</div>
+
+<div class="grid cards">
+  <div class="card {{ 'good' if counts.done + counts.already == rows|length and rows }}"><div class="label">Reconciled</div><div class="value">{{ counts.done + counts.already }} / {{ rows|length }}</div><div class="sub">accounts × days paired</div></div>
+  <div class="card {{ 'bad' if counts.stopped + counts.confirm }}"><div class="label">Need attention</div><div class="value">{{ counts.stopped + counts.confirm }}</div><div class="sub">stopped or waiting for a confirmation</div></div>
+  <div class="card"><div class="label">Missing a file</div><div class="value">{{ lonely|length }}</div><div class="sub">statement or bank book still to upload</div></div>
+  <div class="card {{ 'bad' if unknown }}"><div class="label">Not identified</div><div class="value">{{ unknown|length }}</div><div class="sub">choose the account below</div></div>
+</div>
+
+{% if unknown %}
+<div class="section-title">Files to identify</div>
+<div class="panel tight">
+  <table>
+    <thead><tr><th>File</th><th>Type</th><th>Date</th><th>Why</th><th>Account</th></tr></thead>
+    <tbody>{% for f in unknown %}
+      <tr>
+        <td class="mono">{{ f.name }}</td>
+        <td>{{ {'statement':'Bank statement','book':'Bank book'}.get(f.kind, '—') }}</td>
+        <td class="nowrap">{{ f.date_from | dmy if f.date_from else '—' }}</td>
+        <td class="small muted" style="max-width:380px">{{ f.how }}</td>
+        <td>{% if f.kind in ('statement', 'book') %}
+          <form method="post" action="{{ base }}/reconcile/batch/{{ b.id }}/assign" style="display:flex;gap:6px">
+            <input type="hidden" name="csrf_token" value="{{ csrf }}"><input type="hidden" name="fid" value="{{ f.fid }}">
+            <select name="account_id" required style="width:auto;max-width:260px"><option value="">Choose…</option>
+              {% for a in accounts %}<option value="{{ a.id }}">{{ a.nickname }} (…{{ a.acc_no[-4:] }})</option>{% endfor %}</select>
+            <button class="btn small primary">Assign</button>
+          </form>{% else %}<span class="faint">Can't be used</span>{% endif %}</td>
+      </tr>{% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endif %}
+
+<div class="section-title">Reconciliations</div>
+<div class="panel tight">
+  {% if not rows %}<div class="empty">No complete pairs yet: each account needs its bank statement and its bank book for the same day.</div>{% else %}
+  <table>
+    <thead><tr><th>Account</th><th>Date</th><th>Bank statement</th><th>Bank book</th><th>Result</th><th></th></tr></thead>
+    <tbody>{% for r in rows %}
+      <tr>
+        <td><strong>{{ r.acc.nickname }}</strong><div class="faint small">…{{ r.acc.acc_no[-4:] }} · {{ r.stmt_f.how }}{% if r.book_f.how != r.stmt_f.how %} / {{ r.book_f.how }}{% endif %}</div></td>
+        <td class="nowrap">{{ r.date | dmy if r.date else '—' }}</td>
+        <td class="mono small">{{ r.stmt_f.name }}</td>
+        <td class="mono small">{{ r.book_f.name }}</td>
+        <td style="max-width:420px">
+          {% if r.status == 'done' %}<span class="pill ok">Reconciled</span>
+          {% elif r.status == 'already' %}<span class="pill neutral">Already reconciled</span>
+          {% elif r.status == 'confirm' %}<span class="pill review">Needs confirmation</span><div class="small muted" style="margin-top:4px">{{ r.message }}</div>
+          {% elif r.status == 'stopped' %}<span class="pill critical">Stopped</span><div class="small muted" style="margin-top:4px">{{ r.message }}</div>
+          {% elif r.status == 'waiting' %}<span class="pill neutral">Waiting</span><div class="small muted" style="margin-top:4px">{{ r.message }}</div>
+          {% else %}<span class="pill neutral">Not run</span>{% endif %}
+        </td>
+        <td class="num nowrap">
+          {% if r.run_id %}<a class="btn small" href="{{ base }}/runs/{{ r.run_id }}">View</a>{% endif %}
+          {% if r.token and r.status in ('stopped', 'confirm') %}<a class="btn small primary" href="{{ base }}/reconcile/resume/{{ r.token }}">Open</a>{% endif %}
+        </td>
+      </tr>{% endfor %}
+    </tbody>
+  </table>
+  {% endif %}
+</div>
+
+{% if lonely or still %}
+<div class="section-title">Still needed</div>
+<div class="panel tight">
+  <table>
+    <thead><tr><th>Account</th><th>Date</th><th>Uploaded</th><th>Still needed</th></tr></thead>
+    <tbody>
+    {% for f in lonely %}
+      <tr><td><strong>{{ f.acc.nickname }}</strong> <span class="faint small">…{{ f.acc.acc_no[-4:] }}</span></td>
+          <td class="nowrap">{{ f.date_from | dmy if f.date_from else '—' }}</td>
+          <td class="mono small">{{ f.name }}</td>
+          <td><span class="pill review">{{ 'Bank book' if f.needs == 'book' else 'Bank statement' }}</span></td></tr>
+    {% endfor %}
+    {% for d, grp in still | groupby('date') %}
+      <tr><td><strong>{{ grp|length }} account(s) with nothing uploaded</strong>
+            <div class="small muted" style="margin-top:3px;max-width:560px">{% for x in grp %}{{ x.acc.branch or x.acc.nickname }} …{{ x.acc.acc_no[-4:] }}{% if not loop.last %} · {% endif %}{% endfor %}</div></td>
+          <td class="nowrap">{{ d | dmy }}</td><td class="faint">—</td>
+          <td><span class="pill neutral">Statement and bank book</span></td></tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endif %}
+
+{% if dupes %}<div class="panel small muted">Ignored as duplicates (same account and day already paired): {% for f in dupes %}<span class="mono">{{ f.name }}</span>{% if not loop.last %}, {% endif %}{% endfor %}</div>{% endif %}
+
+<form class="panel" method="post" action="{{ base }}/reconcile/batch/{{ b.id }}/add" enctype="multipart/form-data">
+  <input type="hidden" name="csrf_token" value="{{ csrf }}">
+  <h2>Add more files</h2>
+  <div class="drop">
+    <input type="file" name="files" accept=".xls,.xlsx,.csv" multiple required>
+    <div class="t">Drop the missing statements and bank books</div>
+    <div class="muted small">They are identified and paired with what is already here, then reconciled.</div>
+    <div class="f"></div>
+  </div>
+  <button class="btn primary" style="margin-top:12px">Add and reconcile</button>
+</form>
+{% endblock %}

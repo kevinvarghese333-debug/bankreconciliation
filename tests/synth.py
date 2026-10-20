@@ -22,7 +22,8 @@ def write_statement(path, d: date, opening: float, txns: list[tuple]):
     return bal
 
 
-def write_book(path, d: date, opening: float, entries: list[dict], company="Freemen Investments Pvt. Ltd."):
+def write_book(path, d: date, opening: float, entries: list[dict], company="Freemen Investments Pvt. Ltd.",
+               branch="North Paravur"):
     """entries: dict(vno, vtype, name, loan_ac, instr, receipt, payment, narration?)"""
     wb = openpyxl.Workbook()
     ws = wb.active
@@ -33,7 +34,7 @@ def write_book(path, d: date, opening: float, entries: list[dict], company="Free
     ws.append([2, "Head Office", None, d, None, None, None, None, "Opening", None, 0, 0, 0, " - "])
     ws.append([2, "Head Office", None, d, None, None, None, None, "Total", None, 0, 0, None, " - "])
     ws.append([2, "Head Office", None, d, None, None, None, None, "Closing", None, 0, 0, None, " - "])
-    ws.append([3, "North Paravur", None, d, None, None, None, None, "Opening", None, opening, 0, opening, " - "])
+    ws.append([3, branch, None, d, None, None, None, None, "Opening", None, opening, 0, opening, " - "])
     bal = opening
     dr = cr = 0.0
     for e in entries:
@@ -43,11 +44,11 @@ def write_book(path, d: date, opening: float, entries: list[dict], company="Free
         narr = e.get("narration") or (
             f"Direct Pay, A/c: PERS, A/c No: {e.get('loan_ac','')}, Name: {e['name']}" if e.get("payment")
             else f"Received against loan, A/c: JLGL, A/c No: {e.get('loan_ac','')}, Name: {e['name']}")
-        ws.append([3, "North Paravur", None, d, e["vno"], e.get("vtype", "BP" if e.get("payment") else "BR"),
+        ws.append([3, branch, None, d, e["vno"], e.get("vtype", "BP" if e.get("payment") else "BR"),
                    "x", (f"{e['instr']}, Dt.:{e.get('instr_date', d):%d-%b-%Y}" if e.get("instr") else None), narr, "",
                    e.get("receipt", 0), e.get("payment", 0), bal, ""])
-    ws.append([3, "North Paravur", None, d, None, None, None, None, "Total", None,
+    ws.append([3, branch, None, d, None, None, None, None, "Total", None,
                round(opening + dr, 2), round(cr, 2), None, " - "])
-    ws.append([3, "North Paravur", None, d, None, None, None, None, "Closing", None, bal, 0, None, " - "])
+    ws.append([3, branch, None, d, None, None, None, None, "Closing", None, bal, 0, None, " - "])
     wb.save(path)
     return bal

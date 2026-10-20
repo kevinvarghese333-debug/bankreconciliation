@@ -865,3 +865,54 @@ def test_reconcile_form_requires_backdated_confirmation(conn, tmp_path):
     assert r.status_code == 303 and conn.execute("SELECT COUNT(*) FROM runs").fetchone()[0] == 0
     r = admin.post("/reconcile", data={"account_id": "1", "csrf_token": t, "confirm_backdated": "1"}, files=files)
     assert r.status_code == 200 and "confirm" in r.text.lower()      # first-run confirmation page
+
+
+def test_bulk_upload_identifies_pairs_and_lists_missing(conn, tmp_path):
+    import re
+    conn.execute("UPDATE accounts SET acc_no='0058053000001113', branch='North Paravur' WHERE id=1")
+    conn.execute("UPDATE accounts SET acc_no='0058073000001426', branch='Azhicode' WHERE id=2")
+    for no in ("0058073000001124", "0058073000001177"):
+        conn.execute("INSERT INTO accounts(bank,acc_no,nickname,kind,branch,created_at) VALUES('SIB',?,?,'collection','Head Office','x')",
+                     (no, "HO " + no[-4:]))
+    d = date(2026, 10, 1)
+    f = {}
+    def st(name, rows, op=1000):
+        p = tmp_path / name; write_statement(p, d, op, rows); f[name] = p
+    def bk(name, rows, branch, op=1000):
+        p = tmp_path / name; write_book(p, d, op, rows, branch=branch); f[name] = p
+    st("AccountStatement_XXXXXXXXXXXX1113.xlsx", [_upi("626900001111", "ASHA", 100)])
+    bk("BankBook (1).xlsx", [dict(vno=1, name="ASHA", loan_ac="1", instr="1111", receipt=100)], "North Paravur")
+    st("AccountStatement_XXXXXXXXXXXX1426.xlsx", [_upi("626900002222", "BINU", 200)])
+    bk("BankBook (2).xlsx", [dict(vno=2, name="BINU", loan_ac="2", instr="2222", receipt=200)], "Azhicode")
+    st("AccountStatement_XXXXXXXXXXXX1124.xlsx", [_upi("626900003333", "CIJI", 300)])
+    bk("BankBook (3).xlsx", [dict(vno=3, name="CIJI", loan_ac="3", instr="3333", receipt=300)], "Head Office")
+    (tmp_path / "notes.csv").write_text("hello,world\n")
+    f["notes.csv"] = tmp_path / "notes.csv"
+    admin = _client_setup()
+    t = _tok(admin, "/reconcile")
+    files = [("files", (n, p.read_bytes())) for n, p in f.items()]
+    r = admin.post("/reconcile/batch", data={"csrf_token": t, "confirm_backdated": "1"}, files=files)
+    bid = r.headers["location"].rsplit("/", 1)[-1]
+    page = admin.get(f"/reconcile/batch/{bid}").text
+    # first runs of new accounts need a confirmation; Head Office book is ambiguous (two accounts)
+    assert page.count("Needs confirmation") == 2
+    assert "Branch Head Office has" in page and "Choose which one" in page
+    assert "notes.csv" in page and "be used" in page
+    assert "HO 1124" in page and "Bank book" in page          # 1124 statement waits for its book
+    assert "HO 1177" in page                                    # nothing uploaded for 1177
+    # assign the Head Office book to 1124 -> paired and run
+    from app.main import _batch_load
+    b = _batch_load(bid)
+    ho = [x for x in b["files"] if x["name"] == "BankBook (3).xlsx"][0]
+    admin.post(f"/reconcile/batch/{bid}/assign", data={"csrf_token": t, "fid": ho["fid"], "account_id": "3"})
+    b = _batch_load(bid)
+    assert sum(1 for v in b["results"].values() if v["status"] == "confirm") == 3
+    # confirm one first run through the usual page -> back to the bulk page, marked reconciled
+    tok = next(v["token"] for v in b["results"].values() if v["status"] == "confirm")
+    blocked = admin.get(f"/reconcile/resume/{tok}")
+    assert blocked.status_code == 200 and "Please confirm before continuing" in blocked.text
+    r = admin.post("/reconcile/ack", data={"csrf_token": t, "token": tok, "reason": "Confirmed account for first run"})
+    assert r.headers["location"].endswith(f"/reconcile/batch/{bid}")
+    b = _batch_load(bid)
+    assert sum(1 for v in b["results"].values() if v["status"] == "done") == 1
+    assert conn.execute("SELECT COUNT(*) FROM runs").fetchone()[0] == 1

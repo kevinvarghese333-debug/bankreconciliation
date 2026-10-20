@@ -5,6 +5,30 @@
 {% if not accounts %}
 <div class="panel empty">Add an account first on the <a href="{{ base }}/accounts">Accounts</a> page.</div>
 {% else %}
+<form class="panel" method="post" action="{{ base }}/reconcile/batch" enctype="multipart/form-data" id="batchform">
+  <input type="hidden" name="csrf_token" value="{{ csrf }}">
+  <div class="panelhead"><h2 style="margin:0">Many accounts at once</h2><span class="pill gold">Saves time</span></div>
+  <p class="muted" style="margin-top:0">Drop every bank statement and bank book you downloaded: all branches, any order. The app works out
+    which account each file belongs to (account number, branch, or balances), pairs them by day, reconciles each one,
+    and lists anything still missing.</p>
+  <div class="drop">
+    <input type="file" name="files" accept=".xls,.xlsx,.csv" multiple required>
+    <div class="t">All statements and bank books</div>
+    <div class="muted small">SIB .xls, ICICI .csv and ERP bank book .xlsx files together</div>
+    <div class="f"></div>
+  </div>
+  <label class="confirm">
+    <input type="checkbox" name="confirm_backdated" value="1" required>
+    <span><strong>Are all the back-dated entries posted and updated?</strong> I confirm there will be no more back-dated
+      entries after downloading these reports.</span>
+  </label>
+  <div style="margin-top:18px;display:flex;gap:12px;align-items:center">
+    <button class="btn primary">Sort and reconcile</button>
+    <span class="muted small batchbusy" style="display:none">Reading the files and reconciling… this can take a minute.</span>
+  </div>
+</form>
+
+<div class="section-title">One account</div>
 <form class="panel" method="post" action="{{ base }}/reconcile" enctype="multipart/form-data" id="recoform">
   <input type="hidden" name="csrf_token" value="{{ csrf }}">
   <div class="field" style="max-width:520px">

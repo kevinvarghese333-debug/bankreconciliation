@@ -16,7 +16,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from starlette.middleware.sessions import SessionMiddleware
 
-from . import accounts_import, auth, db, engine, report, roles
+from . import accounts_import, auth, batch, db, engine, report, roles
 from .parsers import inr
 
 BASE = Path(__file__).resolve().parent
@@ -540,7 +540,7 @@ def _cleanup_staging():
     if not STAGING.exists():
         return
     for d in STAGING.iterdir():
-        if d.is_dir() and time.time() - d.stat().st_mtime > 3600:
+        if d.is_dir() and time.time() - d.stat().st_mtime > 12 * 3600:
             shutil.rmtree(d, ignore_errors=True)
 
 
@@ -579,12 +579,17 @@ def _finish_upload(request, token, meta, acknowledged=False, reason=""):
             return redirect("/reconcile", ("error", f"Could not process the files: {e}"), request)
     finally:
         c.close()
+    if meta.get("batch"):
+        _batch_mark(meta["batch"], meta.get("pairkey", ""), {"status": "done", "run_id": rid, "message": ""})
     if KEEP_UPLOADS:
         keep = db.DATA_DIR / "uploads" / str(rid)
         keep.mkdir(parents=True, exist_ok=True)
         shutil.copy(meta["bank_path"], keep / meta["bank_name"])
         shutil.copy(meta["book_path"], keep / meta["book_name"])
     shutil.rmtree(folder, ignore_errors=True)
+    if meta.get("batch"):
+        return redirect(f"/reconcile/batch/{meta['batch']}", ("ok", f"Run #{rid} reconciled. Continue with the rest below."),
+                        request)
     return redirect(f"/runs/{rid}", ("ok", "Reconciliation complete."), request)
 
 
@@ -642,6 +647,243 @@ def reconcile_backdated(request: Request, token: str = Form(...), backdated_file
     return _finish_upload(request, token, meta)
 
 
+# ---------------------------------------------------------------------------- bulk upload (many accounts at once)
+
+def _batch_dir(bid: str) -> Path:
+    if not bid.isalnum():
+        raise ValueError("bad batch id")
+    return STAGING / f"batch_{bid}"
+
+
+def _batch_load(bid: str) -> dict | None:
+    p = _batch_dir(bid) / "batch.json"
+    return json.loads(p.read_text()) if p.exists() else None
+
+
+def _batch_save(b: dict) -> None:
+    d = _batch_dir(b["id"])
+    (d / "batch.json").write_text(json.dumps(b, default=str))
+    os.utime(d, None)
+
+
+def _batch_mark(bid: str, key: str, result: dict) -> None:
+    b = _batch_load(bid)
+    if b is not None and key:
+        b.setdefault("results", {})[key] = result
+        _batch_save(b)
+
+
+def _batch_add(c, b: dict, uploads: list[UploadFile]) -> list[str]:
+    errors = []
+    accounts = [dict(a) for a in c.execute("SELECT * FROM accounts WHERE active=1")]
+    d = _batch_dir(b["id"])
+    for up in uploads:
+        if not up or not up.filename:
+            continue
+        try:
+            path, name = _stage(up, d)
+        except ValueError as e:
+            errors.append(str(e))
+            continue
+        info = batch.classify(str(path), name)
+        f = {"fid": secrets.token_hex(5), "name": name, "path": str(path), "kind": info["kind"],
+             "date_from": info["date_from"].isoformat() if info["date_from"] else None,
+             "date_to": info["date_to"].isoformat() if info["date_to"] else None,
+             "error": info["error"], "account_id": None, "how": ""}
+        if info["kind"] != "unknown":
+            f["account_id"], f["how"] = batch.identify(c, info, accounts)
+        else:
+            f["how"] = info["error"] or "Not a bank statement or an ERP bank book."
+        b["files"].append(f)
+    return errors
+
+
+def _batch_run(c, b: dict, username: str) -> None:
+    """Reconcile every complete pair that is not done yet, oldest day first per account."""
+    pl = batch.plan(b["files"])
+    files = {f["fid"]: f for f in b["files"]}
+    res = b.setdefault("results", {})
+    blocked_accounts = set()
+    for p in pl["pairs"]:
+        key = f"{p['stmt']}|{p['book']}"
+        r = res.get(key, {})
+        if r.get("status") in ("done", "already"):
+            continue
+        if p["account_id"] in blocked_accounts:
+            res[key] = {"status": "waiting", "message": "Waiting for the earlier day of this account."}
+            continue
+        s, k = files[p["stmt"]], files[p["book"]]
+        token = secrets.token_hex(12)
+        (STAGING / token).mkdir(parents=True, exist_ok=True)
+        meta = {"account_id": p["account_id"], "bank_path": s["path"], "bank_name": s["name"],
+                "book_path": k["path"], "book_name": k["name"], "user": username, "confirmed": True,
+                "backdated_path": None, "backdated_name": "", "batch": b["id"], "pairkey": key}
+        (STAGING / token / "meta.json").write_text(json.dumps(meta))
+        try:
+            rid = engine.reconcile(c, p["account_id"], s["path"], s["name"], k["path"], k["name"], username,
+                                   confirmed=True)
+            res[key] = {"status": "done", "run_id": rid, "message": ""}
+            shutil.rmtree(STAGING / token, ignore_errors=True)
+        except engine.Blocked as e:
+            done = [ch for ch in e.checks if ch["code"] == "ALREADY_DONE"]
+            if done and done[0].get("run_id"):
+                res[key] = {"status": "already", "run_id": done[0]["run_id"], "message": "Already reconciled."}
+                shutil.rmtree(STAGING / token, ignore_errors=True)
+                continue
+            msgs = [ch["message"] for ch in e.checks if ch["level"] == "error"] or [ch["message"] for ch in e.ackable]
+            res[key] = {"status": "confirm" if e.ackable and all(ch in e.ackable for ch in e.checks if ch["level"] == "error")
+                        else "stopped", "message": " · ".join(m[:220] for m in msgs[:2]), "token": token}
+            blocked_accounts.add(p["account_id"])
+        except Exception as e:  # unreadable file etc.
+            res[key] = {"status": "stopped", "message": f"Could not process the files: {e}"}
+            blocked_accounts.add(p["account_id"])
+    b["plan"] = {"pairs": pl["pairs"], "lonely": [x["fid"] for x in pl["lonely"]],
+                 "needs": {x["fid"]: x["needs"] for x in pl["lonely"]}, "dupes": [x["fid"] for x in pl["dupes"]]}
+
+
+@app.post("/reconcile/batch")
+def batch_start(request: Request, files: list[UploadFile] = File(...), confirm_backdated: str = Form(""),
+                csrf_token: str = Form("")):
+    if (g := guard(request, "reconcile")):
+        return g
+    if not check_csrf(request, csrf_token):
+        return redirect("/reconcile", ("error", "Session expired, try again."), request)
+    if confirm_backdated != "1":
+        return redirect("/reconcile", ("error", "Please confirm that all back-dated entries are posted and that there "
+                                                "will be no more back-dated entries after downloading the reports."), request)
+    _cleanup_staging()
+    bid = secrets.token_hex(8)
+    _batch_dir(bid).mkdir(parents=True, exist_ok=True)
+    b = {"id": bid, "user": user(request), "created": db.now(), "files": [], "results": {}}
+    c = conn()
+    try:
+        errs = _batch_add(c, b, files)
+        _batch_run(c, b, user(request))
+        db.audit(c, user(request), "batch_upload", f"{len(b['files'])} file(s); confirmed back-dated entries posted")
+    finally:
+        c.close()
+    _batch_save(b)
+    return redirect(f"/reconcile/batch/{bid}", ("error", "; ".join(errs)) if errs else None, request)
+
+
+def _batch_guard(request: Request, bid: str):
+    if (g := guard(request, "reconcile")):
+        return g, None
+    try:
+        b = _batch_load(bid)
+    except ValueError:
+        b = None
+    if not b:
+        return redirect("/reconcile", ("error", "That upload has expired (12 hours). Please upload again."), request), None
+    if b["user"] != user(request):
+        return redirect("/reconcile", ("error", "That upload belongs to another user."), request), None
+    return None, b
+
+
+@app.get("/reconcile/batch/{bid}", response_class=HTMLResponse)
+def batch_view(request: Request, bid: str):
+    g, b = _batch_guard(request, bid)
+    if g:
+        return g
+    c = conn()
+    try:
+        accounts = {a["id"]: dict(a) for a in c.execute("SELECT * FROM accounts")}
+        for a in accounts.values():
+            lr = engine.latest_run(c, a["id"])
+            a["last_to"] = lr["period_to"] if lr else None
+    finally:
+        c.close()
+    files = {f["fid"]: f for f in b["files"]}
+    pl = b.get("plan") or {"pairs": [], "lonely": [], "needs": {}, "dupes": []}
+    rows = []
+    for p in pl["pairs"]:
+        r = b.get("results", {}).get(f"{p['stmt']}|{p['book']}", {"status": "pending"})
+        rows.append(dict(p, acc=accounts.get(p["account_id"]), stmt_f=files[p["stmt"]], book_f=files[p["book"]], **r))
+    lonely = [dict(files[fid], needs=pl["needs"].get(fid), acc=accounts.get(files[fid]["account_id"]))
+              for fid in pl["lonely"]]
+    unknown = [f for f in b["files"] if not f["account_id"]]
+    dupes = [files[fid] for fid in pl["dupes"]]
+    days = sorted({p["date"] for p in pl["pairs"] if p["date"]} | {x["date_from"] for x in lonely if x.get("date_from")})
+    covered = {(p["account_id"], p["date"]) for p in pl["pairs"]}
+    partial = {(x["account_id"], x["date_from"]) for x in lonely}
+    still = []
+    for d in days:
+        for a in accounts.values():
+            if a["active"] and (a["id"], d) not in covered and (a["id"], d) not in partial \
+                    and not (a["last_to"] and a["last_to"] >= d):
+                still.append({"date": d, "acc": a})
+    counts = {k: sum(1 for r in rows if r["status"] == k) for k in ("done", "already", "confirm", "stopped", "waiting", "pending")}
+    return render(request, "batch.html", b=b, rows=rows, lonely=lonely, unknown=unknown, dupes=dupes, still=still,
+                  days=days, counts=counts, accounts=sorted((a for a in accounts.values() if a["active"]),
+                                                            key=lambda a: a["nickname"]))
+
+
+@app.post("/reconcile/batch/{bid}/add")
+def batch_add_files(request: Request, bid: str, files: list[UploadFile] = File(...), csrf_token: str = Form("")):
+    g, b = _batch_guard(request, bid)
+    if g:
+        return g
+    if not check_csrf(request, csrf_token):
+        return redirect(f"/reconcile/batch/{bid}", ("error", "Session expired, try again."), request)
+    c = conn()
+    try:
+        errs = _batch_add(c, b, files)
+        _batch_run(c, b, user(request))
+    finally:
+        c.close()
+    _batch_save(b)
+    return redirect(f"/reconcile/batch/{bid}", ("error", "; ".join(errs)) if errs else ("ok", "Files added."), request)
+
+
+@app.post("/reconcile/batch/{bid}/assign")
+def batch_assign(request: Request, bid: str, fid: str = Form(...), account_id: str = Form(""), csrf_token: str = Form("")):
+    g, b = _batch_guard(request, bid)
+    if g:
+        return g
+    if not check_csrf(request, csrf_token):
+        return redirect(f"/reconcile/batch/{bid}", ("error", "Session expired, try again."), request)
+    f = next((x for x in b["files"] if x["fid"] == fid), None)
+    if f and account_id.isdigit():
+        f["account_id"], f["how"] = int(account_id), "chosen by " + user(request)
+        c = conn()
+        try:
+            _batch_run(c, b, user(request))
+        finally:
+            c.close()
+        _batch_save(b)
+    return redirect(f"/reconcile/batch/{bid}", ("ok", f"Assigned {f['name']}.") if f else None, request)
+
+
+@app.post("/reconcile/batch/{bid}/run")
+def batch_rerun(request: Request, bid: str, csrf_token: str = Form("")):
+    g, b = _batch_guard(request, bid)
+    if g:
+        return g
+    if not check_csrf(request, csrf_token):
+        return redirect(f"/reconcile/batch/{bid}", ("error", "Session expired, try again."), request)
+    c = conn()
+    try:
+        _batch_run(c, b, user(request))
+    finally:
+        c.close()
+    _batch_save(b)
+    return redirect(f"/reconcile/batch/{bid}", ("ok", "Ran the remaining reconciliations again."), request)
+
+
+@app.get("/reconcile/resume/{token}")
+def reconcile_resume(request: Request, token: str):
+    """Open one stopped reconciliation from a bulk upload (acknowledge, find back-dated entries, or cancel)."""
+    if (g := guard(request, "reconcile")):
+        return g
+    mp = STAGING / token / "meta.json"
+    if not token.isalnum() or not mp.exists():
+        return redirect("/reconcile", ("error", "That upload has expired. Please upload again."), request)
+    meta = json.loads(mp.read_text())
+    if meta.get("user") != user(request):
+        return redirect("/reconcile", ("error", "Upload belongs to another session."), request)
+    return _finish_upload(request, token, meta)
+
+
 @app.post("/reconcile/ack")
 def reconcile_ack(request: Request, token: str = Form(...), reason: str = Form(""), csrf_token: str = Form("")):
     if (g := guard(request, "reconcile")):
@@ -664,7 +906,13 @@ def reconcile_cancel(request: Request, token: str = Form(...), csrf_token: str =
     if (g := guard(request, "reconcile")):
         return g
     if check_csrf(request, csrf_token) and token.isalnum():
+        mp = STAGING / token / "meta.json"
+        meta = json.loads(mp.read_text()) if mp.exists() else {}
         shutil.rmtree(STAGING / token, ignore_errors=True)
+        if meta.get("batch"):
+            _batch_mark(meta["batch"], meta.get("pairkey", ""),
+                        {"status": "stopped", "message": "Cancelled. Upload corrected files with 'Add more files'."})
+            return redirect(f"/reconcile/batch/{meta['batch']}")
     return redirect("/reconcile")
 
 
