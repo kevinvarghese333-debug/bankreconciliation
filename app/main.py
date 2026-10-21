@@ -50,6 +50,14 @@ try:
         db.set_setting(_c, "recheck_2026_10_03", db.now())
 except Exception as _e:  # never stop the app from starting
     print("re-check skipped:", _e)
+# One-time (21-10-2026): latest runs re-graded with the next-day timing rules (first-day one-sided lines = warning).
+try:
+    if not db.get_setting(_c, "timing_rules_2026_10_21"):
+        with db.tx(_c):
+            engine.refresh_latest_runs(_c)
+        db.set_setting(_c, "timing_rules_2026_10_21", db.now())
+except Exception as _e:
+    print("timing refresh skipped:", _e)
 # One-time (20-10-2026): large one-of-a-kind credits (own-account transfers) and names written in the voucher
 # narration, applied to the …113 account (29-09-2026: ₹8,10,30,000 transfer left open).
 try:
@@ -131,6 +139,15 @@ def render(request: Request, name: str, **ctx):
                flash=request.session.pop("flash", None), role=role,
                role_label=roles.LABELS.get(role, ""), full_name=getattr(request.state, "full_name", ""),
                can=lambda perm: roles.can(role, perm))
+    ctx["inbox_unread"] = 0
+    if roles.can(role, "inbox") and user(request):
+        c = conn()
+        try:
+            ctx["inbox_unread"] = engine.unread_alerts(c, user(request))
+        except Exception:  # never break a page over the badge
+            pass
+        finally:
+            c.close()
     return templates.TemplateResponse(request, name, ctx)
 
 
@@ -1468,6 +1485,45 @@ def audit_page(request: Request):
     finally:
         c.close()
     return render(request, "audit.html", rows=rows)
+
+
+@app.get("/inbox", response_class=HTMLResponse)
+def inbox_page(request: Request):
+    if (g := guard(request, "inbox")):
+        return g
+    show = request.query_params.get("show", "unread")
+    c = conn()
+    try:
+        rows = [dict(r) for r in c.execute(
+            "SELECT a.*, r.read_at FROM alerts a LEFT JOIN alert_reads r ON r.alert_id=a.id AND r.username=? "
+            "ORDER BY a.id DESC LIMIT 300", (user(request),))]
+    finally:
+        c.close()
+    unread = sum(1 for r in rows if not r["read_at"])
+    if show == "unread":
+        rows = [r for r in rows if not r["read_at"]]
+    return render(request, "inbox.html", rows=rows, show=show, unread=unread)
+
+
+@app.post("/inbox/read")
+def inbox_read(request: Request, alert_id: str = Form("all"), csrf_token: str = Form(""), next: str = Form("")):
+    if (g := guard(request, "inbox")):
+        return g
+    if not check_csrf(request, csrf_token):
+        return redirect("/inbox", ("error", "Session expired, try again."), request)
+    c = conn()
+    try:
+        with db.tx(c):
+            ids = ([r[0] for r in c.execute("SELECT id FROM alerts")] if alert_id == "all"
+                   else [int(alert_id)] if alert_id.isdigit() else [])
+            for i in ids:
+                c.execute("INSERT OR IGNORE INTO alert_reads (alert_id, username, read_at) VALUES (?,?,?)",
+                          (i, user(request), db.now()))
+    finally:
+        c.close()
+    if next.startswith("/runs/") and next[6:].split("#")[0].isdigit():
+        return redirect(next)
+    return redirect("/inbox?show=" + ("all" if alert_id != "all" else "unread"))
 
 
 @app.get("/healthz")

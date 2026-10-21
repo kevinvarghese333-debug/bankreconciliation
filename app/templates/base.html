@@ -24,6 +24,7 @@
       <a href="{{ base }}/history" class="{{ 'on' if p.startswith('/history') or p.startswith('/runs') }}">{{ icon('history') }}<span>History</span></a>
       <a href="{{ base }}/accounts" class="{{ 'on' if p.startswith('/accounts') }}">{{ icon('accounts') }}<span>Accounts</span></a>
       <a href="{{ base }}/holidays" class="{{ 'on' if p.startswith('/holidays') }}">{{ icon('holidays') }}<span>Holidays</span></a>
+      {% if can('inbox') %}<a href="{{ base }}/inbox" class="{{ 'on' if p.startswith('/inbox') }}">{{ icon('bell') }}<span>Inbox</span>{% if inbox_unread %}<span class="count">{{ inbox_unread }}</span>{% endif %}</a>{% endif %}
       {% if can('audit') %}<a href="{{ base }}/audit" class="{{ 'on' if p.startswith('/audit') }}">{{ icon('audit') }}<span>Audit log</span></a>{% endif %}
       {% if can('admin') %}<a href="{{ base }}/admin" class="{{ 'on' if p.startswith('/admin') }}">{{ icon('admin') }}<span>Admin</span><span class="tag">Admin</span></a>{% endif %}
     </nav>
@@ -40,6 +41,7 @@
         <input type="text" name="q" placeholder="Search customer, UTR, amount, voucher…" value="{{ request.query_params.get('q', '') if p.startswith('/search') else '' }}" autocomplete="off">
       </form>
       <div class="topright">
+        {% if can('inbox') %}<a class="iconbtn bell" href="{{ base }}/inbox" title="Inbox" aria-label="Inbox{% if inbox_unread %}, {{ inbox_unread }} unread{% endif %}">{{ icon('bell') }}{% if inbox_unread %}<span class="dot">{{ inbox_unread if inbox_unread < 100 else '99+' }}</span>{% endif %}</a>{% endif %}
         <a class="userchip" href="{{ base }}/me" title="My account">
           <span class="avatar">{{ (full_name or user)[:1] | upper }}</span>
           <span class="uname">{{ full_name or user }}<span class="urole">{{ role_label }}</span></span>

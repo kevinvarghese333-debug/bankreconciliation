@@ -626,13 +626,29 @@ def build_flags(bank: list[dict], book: list[dict], matches: list[dict], account
                   f"Money left the account on {hol} · ₹{inr(b['amount'])} · {who_}{ref}. Branches are closed, so it "
                   "is held until the next working day's bank book; if it is not there it turns Critical.", [b["key"]])
             continue
+        # Timing: what reaches the bank after the branch closes (or is booked by the ERP next morning) is posted the
+        # next working day. On its own day it is a warning; still open after the next working day's book → escalate.
+        bage = working_days_between(b["date"], as_of, holidays) if holidays else (as_of - b["date"]).days
+        who_ = b["name"] or b["text"][:60]
+        # a debit from a collection account is never routine (only sweeps leave it): Critical at once
+        if bage == 0 and not (b["dir"] == "out" and account_type == "collection"):
+            if b["dir"] == "out":
+                f("medium", "TIMING_BANK_DEBIT", "Bank debit not yet in the bank book: to be booked next working day",
+                  f"{b['date']:%d-%m-%Y} · ₹{inr(b['amount'])} · {who_}. Treated as a timing difference. If it is not in "
+                  "the next working day's bank book it turns Critical.", [b["key"]])
+            else:
+                f("medium", "TIMING_BANK_CREDIT", "Bank credit not yet in the bank book: to be booked next working day",
+                  f"{b['date']:%d-%m-%Y} · ₹{inr(b['amount'])} · {who_}. Treated as a timing difference. If it is not in "
+                  "the next working day's bank book it turns High.", [b["key"]])
+            continue
+        late_ = f" · first seen {b['date']:%d-%m-%Y}, not booked by the next working day"
         if b["dir"] == "out":
             what = "Outflow from collection account" if account_type == "collection" else "Bank debit"
             f("critical", "BANK_DEBIT_NOT_IN_BOOK", f"{what} not recorded in bank book",
-              f"{b['date']:%d-%m-%Y} · ₹{inr(b['amount'])} · {b['name'] or b['text'][:60]}", [b["key"]])
+              f"{b['date']:%d-%m-%Y} · ₹{inr(b['amount'])} · {who_}{late_}", [b["key"]])
         else:
-            f("medium", "BANK_CREDIT_NOT_IN_BOOK", "Credit in bank not posted in bank book",
-              f"{b['date']:%d-%m-%Y} · ₹{inr(b['amount'])} · {b['name']}", [b["key"]])
+            f("high", "BANK_CREDIT_NOT_IN_BOOK", "Credit in bank not posted in bank book",
+              f"{b['date']:%d-%m-%Y} · ₹{inr(b['amount'])} · {who_}{late_}", [b["key"]])
     for d, bs in sorted(waiting.items()):
         f("info", "HOLIDAY_RECEIPTS_PENDING",
           f"{len(bs)} receipt(s) on {day_label(d, holidays)} waiting for the next working day's bank book",
@@ -644,6 +660,13 @@ def build_flags(bank: list[dict], book: list[dict], matches: list[dict], account
             continue
         age = working_days_between(k["date"], as_of, holidays) if holidays else (as_of - k["date"]).days
         aged = f" · open {age} working day(s)" if age else ""
+        if age == 0:  # booked today, reaches the bank next working day (after cut-off, cheque, cash deposit)
+            f("medium", "TIMING_BOOK_PAYMENT" if k["dir"] == "out" else "TIMING_BOOK_RECEIPT",
+              ("Payment in bank book not yet debited by bank" if k["dir"] == "out"
+               else "Receipt in bank book not yet credited by bank") + ": expected next working day",
+              f"Vchr {k['vno']} · {k['date']:%d-%m-%Y} · ₹{inr(k['amount'])} · {k['name']}. Treated as a timing "
+              "difference. If the bank does not show it on the next working day it turns High.", [k["key"]])
+            continue
         if k["dir"] == "out":
             f("critical" if age >= aged_days else "high", "BOOK_PAYMENT_NOT_IN_BANK",
               "Payment in bank book not debited by bank" + (" (aged)" if age >= aged_days else ""),

@@ -1,0 +1,43 @@
+{% extends "base.html" %}
+{% block title %}Inbox · Bank Reco{% endblock %}
+{% block content %}
+<div class="pagehead">
+  <div><h1>Inbox</h1>
+    <div class="muted">What operators' runs adjusted on their own: timing differences carried to the next working day, entries booked late with the previous day's date, and items not cleared by the next working day.</div></div>
+  <div class="actions">
+    <div class="chips">
+      <a class="chip {{ 'on' if show == 'unread' }}" href="{{ base }}/inbox?show=unread">Unread {{ unread }}</a>
+      <a class="chip {{ 'on' if show == 'all' }}" href="{{ base }}/inbox?show=all">All</a>
+    </div>
+    {% if unread %}<form method="post" action="{{ base }}/inbox/read"><input type="hidden" name="csrf_token" value="{{ csrf }}"><input type="hidden" name="alert_id" value="all"><button class="btn" type="submit">Mark all read</button></form>{% endif %}
+  </div>
+</div>
+{% if not rows %}
+<div class="panel empty">{% if show == 'unread' %}Nothing new. <a href="{{ base }}/inbox?show=all">See all alerts</a>.{% else %}No alerts yet.{% endif %}</div>
+{% else %}
+<div class="panel tight">
+  {% for a in rows %}
+  <div class="alertrow {{ '' if a.read_at else 'unread' }}">
+    <div><span class="pill {{ {'critical':'critical','high':'high'}.get(a.severity, 'medium') }}">{{ {'critical':'Critical','high':'High'}.get(a.severity, 'Warning') }}</span></div>
+    <div>
+      <div class="t">{{ a.title }}</div>
+      <div class="faint small">{{ a.created_at[:16] }} · run by {{ a.created_by }}{% if a.read_at %} · read {{ a.read_at[:16] }}{% endif %}</div>
+      <details class="small"><summary>Details</summary><pre class="alertbody">{{ a.body }}</pre></details>
+    </div>
+    <div class="nowrap">
+      {% if a.run_id %}
+      <form method="post" action="{{ base }}/inbox/read" style="display:inline">
+        <input type="hidden" name="csrf_token" value="{{ csrf }}"><input type="hidden" name="alert_id" value="{{ a.id }}">
+        <input type="hidden" name="next" value="/runs/{{ a.run_id }}#flags"><button class="btn small primary" type="submit">Open run</button>
+      </form>{% endif %}
+      {% if not a.read_at %}
+      <form method="post" action="{{ base }}/inbox/read" style="display:inline">
+        <input type="hidden" name="csrf_token" value="{{ csrf }}"><input type="hidden" name="alert_id" value="{{ a.id }}">
+        <button class="btn small" type="submit">Mark read</button>
+      </form>{% endif %}
+    </div>
+  </div>
+  {% endfor %}
+</div>
+{% endif %}
+{% endblock %}

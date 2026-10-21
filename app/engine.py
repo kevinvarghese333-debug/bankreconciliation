@@ -11,7 +11,7 @@ from collections import defaultdict
 from datetime import date, timedelta
 
 from . import db
-from .matcher import Matcher, build_flags, compute_brs, TOL, BIG_CREDIT, named_in_narration
+from .matcher import Matcher, build_flags, compute_brs, find_subset, TOL, BIG_CREDIT, named_in_narration
 from .parsers import parse_bank_book, parse_bank_books, parse_bank_statement, file_hash, files_hash, inr, check
 
 WINDOW_DAYS = 7
@@ -92,6 +92,88 @@ def cumulative_opening_diff(conn, account_id: int, upto_run: int | None = None) 
     return round(conn.execute(q, args).fetchone()["s"], 2)
 
 
+LATE_METHOD = "Booked late in the ERP with the earlier date"
+TIMING_CODES = ("TIMING_BANK_DEBIT", "TIMING_BANK_CREDIT", "TIMING_BOOK_PAYMENT", "TIMING_BOOK_RECEIPT")
+ESCALATED_CODES = ("BANK_DEBIT_NOT_IN_BOOK", "BANK_CREDIT_NOT_IN_BOOK", "BOOK_PAYMENT_NOT_IN_BANK",
+                   "BOOK_RECEIPT_NOT_IN_BANK")
+
+
+def alert_for_run(conn, run_id: int, user: str) -> int | None:
+    """Tell Managers and Admins what an operator's run adjusted on its own: timing differences carried to the
+    next working day, entries booked late with the earlier date, and timing items that were not cleared."""
+    run = conn.execute("SELECT r.*, a.nickname, a.acc_no FROM runs r JOIN accounts a ON a.id=r.account_id "
+                       "WHERE r.id=?", (run_id,)).fetchone()
+    flags = json.loads(run["flags_json"] or "[]")
+    byk = {}
+    for i in run_items(conn, run_id) + open_items_as_of(conn, run["account_id"], run_id):
+        byk[i["key"]] = i
+
+    def amt(fs):
+        return sum(byk[k]["amount"] for f in fs for k in f.get("keys", []) if k in byk)
+
+    timing = [f for f in flags if f["code"] in TIMING_CODES]
+    late = [f for f in flags if f["code"] == "BOOK_LATE_POSTED"]
+    esc = [f for f in flags if f["code"] in ESCALATED_CODES]
+    if not (timing or late or esc):
+        return None
+    parts, lines = [], []
+    if timing:
+        parts.append(f"{len(timing)} timing difference(s) ₹{inr(amt(timing))}")
+        lines.append(f"Carried to the next working day (warning): {len(timing)} line(s), ₹{inr(amt(timing))}.")
+        lines += [f"  · {f['title'].split(':')[0]} — {f['detail'].split('. Treated')[0]}" for f in timing[:15]]
+        if len(timing) > 15:
+            lines.append(f"  · … and {len(timing) - 15} more (open the run)")
+    if late:
+        n = sum(len(f.get("keys", [])) for f in late)
+        parts.append(f"{n} entr{'y' if n == 1 else 'ies'} booked late")
+        lines += [f"Adjusted automatically: {f['title']}. {f['detail'].split('. These')[0]}." for f in late]
+    if esc:
+        parts.append(f"{len(esc)} not cleared by the next working day")
+        lines.append(f"Not cleared by the next working day (now {', '.join(sorted({f['severity'] for f in esc}))}): "
+                     f"{len(esc)} line(s), ₹{inr(amt(esc))}.")
+        lines += [f"  · {f['title']} — {f['detail']}" for f in esc[:15]]
+        if len(esc) > 15:
+            lines.append(f"  · … and {len(esc) - 15} more (open the run)")
+    sev = "critical" if any(f["severity"] == "critical" for f in esc) else ("high" if esc else "warning")
+    cur = conn.execute("INSERT INTO alerts (created_at, account_id, run_id, severity, title, body, created_by) "
+                       "VALUES (?,?,?,?,?,?,?)",
+                       (db.now(), run["account_id"], run_id, sev,
+                        f"{run['nickname']} (…{run['acc_no'][-4:]}) · {date.fromisoformat(run['period_to']):%d-%m-%Y}: "
+                        + ", ".join(parts), "\n".join(lines), user))
+    return cur.lastrowid
+
+
+def unread_alerts(conn, username: str) -> int:
+    return conn.execute("SELECT COUNT(*) FROM alerts a WHERE NOT EXISTS (SELECT 1 FROM alert_reads r "
+                        "WHERE r.alert_id=a.id AND r.username=?)", (username,)).fetchone()[0]
+
+
+def explain_late_posting(open_items: list[dict], gap: float, last_day: date) -> list[dict]:
+    """Bank lines left open that the branch booked the next day but dated the earlier day.
+
+    The ERP then shows them only in the new book's opening balance (book opening − previous book closing = gap).
+    Returns the open bank lines that make up the gap exactly — preferring the previous day's own lines —
+    or [] when no such set exists (then a Manager has to look at it)."""
+    if abs(gap) <= TOL:
+        return []
+    bank = [i for i in open_items if i["side"] == "bank"]
+    signed = lambda i: i["amount"] if i["dir"] == "in" else -i["amount"]   # noqa: E731
+    pools = [[i for i in bank if i["date"] == last_day], bank]
+    for pool in pools:
+        if not pool:
+            continue
+        if abs(sum(signed(i) for i in pool) - gap) <= TOL:
+            return pool
+        same = [i for i in pool if (signed(i) > 0) == (gap > 0)]
+        one = [i for i in same if abs(i["amount"] - abs(gap)) <= TOL]
+        if len(one) == 1:
+            return one
+        sub = find_subset(abs(gap), same, max_size=12, max_items=40) if len(one) == 0 else None
+        if sub:
+            return sub
+    return []
+
+
 def net_open(items: list[dict]) -> float:
     """Effect of open items on (bank − book): + book payments − book receipts + bank credits − bank debits."""
     t = 0.0
@@ -150,7 +232,12 @@ def flag_subject(flag: dict, run_id: int) -> str:
     """Stable id for an exception: the same open items give the same id on later days,
     so a review recorded once stays attached while the item is carried forward."""
     keys = ",".join(sorted(flag.get("keys") or [], key=lambda k: int(k) if str(k).isdigit() else 0))
-    return f"{flag['code']}|{keys or 'run' + str(run_id)}"
+    code = TIMING_BASE.get(flag["code"], flag["code"])   # a timing item that escalates keeps its review
+    return f"{code}|{keys or 'run' + str(run_id)}"
+
+
+TIMING_BASE = {"TIMING_BANK_DEBIT": "BANK_DEBIT_NOT_IN_BOOK", "TIMING_BANK_CREDIT": "BANK_CREDIT_NOT_IN_BOOK",
+               "TIMING_BOOK_PAYMENT": "BOOK_PAYMENT_NOT_IN_BANK", "TIMING_BOOK_RECEIPT": "BOOK_RECEIPT_NOT_IN_BANK"}
 
 
 def latest_reviews(conn, account_id: int) -> dict:
@@ -351,6 +438,7 @@ def _reconcile(conn, account_id, bank_path, bank_name, book_path, book_name, use
     carried = []
     backdated_new: list[dict] = []
     backdated_gone: list[dict] = []
+    late_posted: list[dict] = []
     if confirmed:
         add("ok", "CONFIRM_BACKDATED", f"{user} confirmed that all back-dated entries are posted and updated, and that "
                                        "there will be no more back-dated entries after downloading the report.")
@@ -417,6 +505,16 @@ def _reconcile(conn, account_id, bank_path, bank_name, book_path, book_name, use
                 add("error" if not acknowledged else "warning", "BOOK_CONTINUITY",
                     f"Book opening ₹{inr(book['opening'])} ≠ previous book closing ₹{inr(last['book_close'])} "
                     f"(difference ₹{inr(book['opening'] - last['book_close'])}). " + bd["message"], can_ack=True)
+        elif abs(last["book_close"] - book["opening"]) > TOL and (late_posted := explain_late_posting(
+                open_items_as_of(conn, account_id, last["id"]), round(book["opening"] - last["book_close"], 2),
+                date.fromisoformat(last["period_to"]))):
+            add("warning", "BOOK_LATE_POSTED",
+                f"Book opening ₹{inr(book['opening'])} ≠ previous book closing ₹{inr(last['book_close'])} "
+                f"(difference ₹{inr(book['opening'] - last['book_close'])}). This equals {len(late_posted)} bank "
+                f"line(s) left open on {last['period_to']}, so they were booked in the ERP the next day with the "
+                "earlier date: " + "; ".join(f"{i['date']:%d-%m} {i['name'] or i.get('text', '')[:30]} "
+                                             f"{'+' if i['dir'] == 'in' else '−'}₹{inr(i['amount'])}" for i in late_posted[:8])
+                + ". Adjusted automatically as booked late; Managers and Admins are alerted.")
         elif abs(last["book_close"] - book["opening"]) > TOL:
             add("error" if not acknowledged else "warning", "BOOK_CONTINUITY",
                 f"Book opening ₹{inr(book['opening'])} ≠ previous book closing ₹{inr(last['book_close'])} "
@@ -428,7 +526,7 @@ def _reconcile(conn, account_id, bank_path, bank_name, book_path, book_name, use
         else:
             add("ok", "BOOK_CONTINUITY", f"Book opening ₹{inr(book['opening'])} = previous closing.")
         carried = open_items_as_of(conn, account_id, last["id"])
-        gone_ids = {i["id"] for i in backdated_gone}
+        gone_ids = {i["id"] for i in backdated_gone} | {i["id"] for i in late_posted}
         carried = [c for c in carried if c["id"] not in gone_ids]
 
     if not last:
@@ -525,6 +623,19 @@ def _reconcile(conn, account_id, bank_path, bank_name, book_path, book_name, use
                  db.now(), "system"))
             conn.execute(f"UPDATE items SET match_id=? WHERE id IN ({','.join('?' * len(backdated_gone))})",
                          (cur.lastrowid, *[i["id"] for i in backdated_gone]))
+        if late_posted:
+            cur = conn.execute(
+                "INSERT INTO matches (run_id, account_id, method, confidence, note, manual, created_at, created_by) "
+                "VALUES (?,?,?,?,?,0,?,?)",
+                (run_id, account_id, LATE_METHOD, "review",
+                 f"Bank line(s) of {last['period_to']} booked in the ERP the next day with the earlier date "
+                 f"(they make up the change in the book's opening balance). Adjusted automatically for {user}.",
+                 db.now(), "system"))
+            conn.execute(f"UPDATE items SET match_id=? WHERE id IN ({','.join('?' * len(late_posted))})",
+                         (cur.lastrowid, *[i["id"] for i in late_posted]))
+            db.audit(conn, user, "late_posted_adjusted",
+                     f"Run #{run_id}: {len(late_posted)} bank line(s) of {last['period_to']} booked late, "
+                     f"₹{inr(sum(i['amount'] for i in late_posted))}")
         if backdated_path:
             db.audit(conn, user, "backdated_check",
                      f"Run #{run_id}: re-downloaded bank book {backdated_name} · {len(backdated_new)} added, "
@@ -551,6 +662,7 @@ def _reconcile(conn, account_id, bank_path, bank_name, book_path, book_name, use
             keys = [int(k) for k in (*m["bank"], *m["book"])]
             conn.execute(f"UPDATE items SET match_id=? WHERE id IN ({','.join('?' * len(keys))})", (mid, *keys))
         refresh_run(conn, run_id)
+        alert_for_run(conn, run_id, user)
         db.audit(conn, user, "reconcile",
                  f"Run #{run_id} · {acc['nickname']} · {p_from}..{p_to} · bank {bank_name} · book {book_name}"
                  + (f" · acknowledged: {ack_reason.strip()}" if ackable else ""))
@@ -649,6 +761,18 @@ def refresh_run(conn, run_id: int) -> None:
                          "detail": "Accepted with an acknowledgement on an earlier run and not itemised. The BRS only "
                                    "balances because of it. Find the cause (missed entry, back-dated voucher) and correct it.",
                          "keys": []})
+    for m in matches:
+        if m["method"] == LATE_METHOD:
+            its = [row_to_item(r) for r in conn.execute("SELECT * FROM items WHERE match_id=?", (m["id"],))]
+            flags.append({"severity": "medium", "code": "BOOK_LATE_POSTED",
+                          "title": f"{len(its)} entr{'y' if len(its) == 1 else 'ies'} booked late in the ERP with the "
+                                   "previous day's date (adjusted automatically)",
+                          "detail": "; ".join(f"{i['date']:%d-%m-%Y} {i['name'] or i.get('text', '')[:40]} "
+                                              f"{'credit' if i['dir'] == 'in' else 'debit'} ₹{inr(i['amount'])}"
+                                              for i in its[:10])
+                                    + ". These were open in the bank yesterday and the ERP now has them dated "
+                                      "yesterday. Branches should post on the day; check who posted them.",
+                          "keys": [i["key"] for i in its]})
     from .matcher import SEV_ORDER
     flags.sort(key=lambda x: SEV_ORDER[x["severity"]])
     own = [i for i in items if i["run_id"] == run_id]
@@ -741,6 +865,8 @@ def _delete_run(conn, run_id: int) -> None:
     conn.execute("DELETE FROM matches WHERE run_id=?", (run_id,))
     conn.execute("DELETE FROM items WHERE run_id=?", (run_id,))
     conn.execute("DELETE FROM runs WHERE id=?", (run_id,))
+    conn.execute("DELETE FROM alert_reads WHERE alert_id IN (SELECT id FROM alerts WHERE run_id=?)", (run_id,))
+    conn.execute("DELETE FROM alerts WHERE run_id=?", (run_id,))
 
 
 def undo_run(conn, run_id: int, user: str) -> None:

@@ -14,7 +14,8 @@ DESCRIPTIONS = {
     "viewer": "Read-only: dashboard, runs, open items, history; download Excel.",
     "operator": "Everything a Viewer can, plus upload and reconcile, manual match, notes, reviews, and adding or removing holidays.",
     "manager": "Everything an Operator can, plus acknowledge warnings, unmatch, undo the latest run, "
-               "sign off runs as checked, and view the audit log.",
+               "sign off runs as checked, view the audit log, and get inbox alerts "
+               "(timing differences and entries booked late that operators' runs adjusted).",
     "admin": "Everything, plus the Admin portal: users and roles, revoking reconciled days, and bank accounts.",
 }
 
@@ -30,6 +31,7 @@ PERMS = {
     "signoff": "manager",
     "holidays": "operator",
     "audit": "manager",
+    "inbox": "manager",
     "accounts": "admin",
     "admin": "admin",
 }
@@ -44,6 +46,7 @@ ACTION_TEXT = {
     "signoff": "sign off runs",
     "holidays": "change holidays",
     "audit": "view the audit log",
+    "inbox": "open the inbox",
     "accounts": "change bank accounts",
     "admin": "open the Admin portal",
 }

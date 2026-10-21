@@ -87,7 +87,7 @@ def test_carry_forward_and_exceptions(conn, tmp_path):
     assert b["add_book_payments_not_debited"] == 30000
     assert b["less_bank_debits_not_in_book"] == 59
     c = codes(conn, r1)
-    assert "BANK_DEBIT_NOT_IN_BOOK" in c and "BOOK_PAYMENT_NOT_IN_BANK" in c
+    assert "TIMING_BANK_DEBIT" in c and "TIMING_BOOK_PAYMENT" in c       # first day: timing difference
 
     # Day 2: B debited by bank (clears carry); charge booked (clears carry); fake receipt in book only
     bank2 = tmp_path / "b2.xlsx"
@@ -111,8 +111,8 @@ def test_carry_forward_and_exceptions(conn, tmp_path):
     assert b["tallies"] and b["less_bank_debits_not_in_book"] == 0 and b["add_book_payments_not_debited"] == 0
     assert b["less_book_receipts_not_credited"] == 1000
     c = codes(conn, r2)
-    assert "BOOK_RECEIPT_NOT_IN_BANK" in c
-    assert "BANK_DEBIT_NOT_IN_BOOK" not in c
+    assert "TIMING_BOOK_RECEIPT" in c
+    assert "BANK_DEBIT_NOT_IN_BOOK" not in c and "TIMING_BANK_DEBIT" not in c
     s = json.loads(conn.execute("SELECT summary_json FROM runs WHERE id=?", (r2,)).fetchone()[0])
     assert s["carried_cleared"] >= 1
 
@@ -277,7 +277,7 @@ def test_carried_payment_not_cleared_by_unrelated_debit(conn, tmp_path):
     write_book(k2, date(2026, 9, 29), kc, [dict(vno=3, name="TOM", loan_ac="07", instr="7777", receipt=250)])
     r2 = run(conn, 1, b2, k2)
     assert _conf(conn, r2, "BINDU RAJAN") is None
-    assert "BANK_DEBIT_NOT_IN_BOOK" in codes(conn, r2)
+    assert "TIMING_BANK_DEBIT" in codes(conn, r2) and "BOOK_PAYMENT_NOT_IN_BANK" in codes(conn, r2)
 
 
 def test_double_disbursal_across_days(conn, tmp_path):
@@ -295,7 +295,7 @@ def test_single_fake_receipt_not_pooled(conn, tmp_path):
     rid, _, _ = _day(conn, tmp_path, 1, date(2026, 9, 28), 1000,
                      [("UPI/SBIN/626900001111/ABDUL RAHIM/UPI/x/a@ok", 0, 1000)],
                      [dict(vno=1, name="SUMA K", instr="4321", receipt=1000)])
-    assert "BOOK_RECEIPT_NOT_IN_BANK" in codes(conn, rid)
+    assert "TIMING_BOOK_RECEIPT" in codes(conn, rid)
 
 
 def test_branch_without_totals_rejected(tmp_path):
@@ -668,7 +668,7 @@ def test_exception_reviews_search_and_excel(conn, tmp_path):
     admin = _client_setup()
     page = admin.get(f"/runs/{r1}").text
     assert 'id="flagsearch"' in page and "0 of" in page and "Unreviewed" in page
-    fl = [f for f in flags(conn, r1) if f["code"] == "BOOK_PAYMENT_NOT_IN_BANK"][0]
+    fl = [f for f in flags(conn, r1) if f["code"] == "TIMING_BOOK_PAYMENT"][0]
     subject = engine.flag_subject(fl, r1)
     t = _tok(admin, f"/runs/{r1}")
     admin.post(f"/runs/{r1}/review", data={"subject": subject, "status": "followup", "remark": "", "csrf_token": t})
@@ -680,17 +680,18 @@ def test_exception_reviews_search_and_excel(conn, tmp_path):
     # Excel: review on Exceptions sheet; level on Open Items
     wb = openpyxl.load_workbook(BytesIO(admin.get(f"/runs/{r1}/excel").content))
     ex = [[c.value for c in row] for row in wb["Exceptions"].iter_rows(min_row=2)]
-    assert any(r[1] == "BOOK_PAYMENT_NOT_IN_BANK" and r[4] == "Needs follow-up" and r[6] == "kev" for r in ex)
+    assert any(r[1] == "TIMING_BOOK_PAYMENT" and r[4] == "Needs follow-up" and r[6] == "kev" for r in ex)
     oi = wb["Open Items"]
     hdr = [c.value for c in oi[3]]
     assert hdr[11] == "Exception level"
     rows = [[c.value for c in row] for row in oi.iter_rows(min_row=4)]
     bindu = [r for r in rows if r[5] == "BINDU RAJAN"][0]
-    assert bindu[11] == "HIGH" and "Needs follow-up" in bindu[13]
+    assert bindu[11] == "MEDIUM" and "Needs follow-up" in bindu[13]
     # the review follows the item when it is carried to the next day
     r2, _, _ = _day(conn, tmp_path, 2, d2, bc, [_upi("626900002222", "CIJI", 200)],
                     [dict(vno=3, name="CIJI", loan_ac="3", instr="2222", receipt=200)], book_op=kc)
     assert "Branch to confirm RAP status" in admin.get(f"/runs/{r2}").text
+    assert "BOOK_PAYMENT_NOT_IN_BANK" in codes(conn, r2)              # escalated, review kept
 
 
 def test_recheck_applies_new_rules_to_old_runs(conn, tmp_path):
@@ -714,14 +715,14 @@ def test_recheck_applies_new_rules_to_old_runs(conn, tmp_path):
         conn.execute("UPDATE items SET match_id=NULL WHERE match_id=?", (mid,))
         conn.execute("DELETE FROM matches WHERE id=?", (mid,))
     engine.refresh_run(conn, r1); engine.refresh_run(conn, r2)
-    assert "BANK_DEBIT_NOT_IN_BOOK" in codes(conn, r1) and "BANK_DEBIT_NOT_IN_BOOK" in codes(conn, r2)
+    assert "TIMING_BANK_DEBIT" in codes(conn, r1) and "BANK_DEBIT_NOT_IN_BOOK" in codes(conn, r2)
     manual_before = conn.execute("SELECT COUNT(*) FROM matches").fetchone()[0]
 
     out = engine.recheck_account(conn, 1, "test")
     assert out["new_matches"] == 2 and out["open_after"] == out["open_before"] - 5
     # recorded on day 1, so day 1's own exceptions are corrected too
     assert {r[0] for r in conn.execute("SELECT run_id FROM matches WHERE created_by='system (re-check)'")} == {r1}
-    assert "BANK_DEBIT_NOT_IN_BOOK" not in codes(conn, r1) and "RENEWAL_NETTED" in codes(conn, r1)
+    assert "TIMING_BANK_DEBIT" not in codes(conn, r1) and "RENEWAL_NETTED" in codes(conn, r1)
     assert "BANK_DEBIT_NOT_IN_BOOK" not in codes(conn, r2)
     assert conn.execute("SELECT COUNT(*) FROM matches").fetchone()[0] == manual_before + 2
     assert brs(conn, r1)["tallies"] and brs(conn, r2)["tallies"]
@@ -998,3 +999,46 @@ def test_large_own_transfer_and_name_in_narration_pair(conn, tmp_path):
     got = {m[0]: m[1] for m in conn.execute("SELECT method, confidence FROM matches WHERE run_id=?", (rid,))}
     assert got.get("Own-account transfer (unique on the day)") == "strong"
     assert got.get("Amount + name in narration (unique on the day)") == "strong"
+
+
+def test_entries_booked_late_with_earlier_date_adjust_without_manager(conn, tmp_path):
+    """Bank lines of day 1 booked in the ERP on day 2 but dated day 1: the day-2 book opening moves by
+    exactly those lines. The operator's run goes through (no acknowledgement) and the lines are closed."""
+    d1, d2 = date(2026, 9, 28), date(2026, 9, 29)
+    r1, bc, kc = _day(conn, tmp_path, 1, d1, 100000,
+                      [("CHRG/SMS CHARGES Q3", 59, 0), ("NACH DR/ACH/LIC PREMIUM", 2000, 0),
+                       _upi("626900001111", "ASHA", 300)],
+                      [dict(vno=1, name="ASHA", loan_ac="1", instr="1111", receipt=300)])
+    assert "TIMING_BANK_DEBIT" in codes(conn, r1)
+    r2, _, _ = _day(conn, tmp_path, 2, d2, bc, [_upi("626900002222", "BINU", 200)],
+                    [dict(vno=3, name="BINU", loan_ac="2", instr="2222", receipt=200)],
+                    book_op=round(kc - 2059, 2))
+    assert brs(conn, r2)["clean"]
+    assert "BOOK_LATE_POSTED" in codes(conn, r2) and "BANK_DEBIT_NOT_IN_BOOK" not in codes(conn, r2)
+    m = conn.execute("SELECT method, run_id FROM matches WHERE method LIKE 'Booked late%'").fetchone()
+    assert m["run_id"] == r2
+
+
+def test_inbox_alerts_managers_not_operators(conn, tmp_path):
+    admin = _client_setup()
+    t = _tok(admin, "/admin")
+    admin.post("/admin/users", data={"username": "anjali", "full_name": "Anjali", "role": "operator",
+                                     "password": "Temp-pass-123", "csrf_token": t})
+    op, _ = _login("anjali", "Temp-pass-123")
+    t2 = _tok(op, "/me")
+    op.post("/password", data={"current": "Temp-pass-123", "new": "anjali-own-pw1", "new2": "anjali-own-pw1",
+                               "csrf_token": t2})
+    d1, d2 = date(2026, 9, 28), date(2026, 9, 29)
+    r1, bc, kc = _day(conn, tmp_path, 1, d1, 100000, [("CHRG/SMS CHARGES Q3", 59, 0), _upi("626900001111", "ASHA", 300)],
+                      [dict(vno=1, name="ASHA", loan_ac="1", instr="1111", receipt=300)])
+    r2, _, _ = _day(conn, tmp_path, 2, d2, bc, [_upi("626900002222", "BINU", 200)],
+                    [dict(vno=3, name="BINU", loan_ac="2", instr="2222", receipt=200)], book_op=round(kc - 59, 2))
+    titles = [r[0] for r in conn.execute("SELECT title FROM alerts ORDER BY id")]
+    assert len(titles) == 2 and "timing difference" in titles[0] and "booked late" in titles[1]
+    assert op.get("/inbox").status_code == 303 and 'class="dot"' not in op.get("/").text   # operators: no inbox
+    page = admin.get("/inbox").text
+    assert "booked late" in page and "Mark all read" in page and 'class="dot">2<' in admin.get("/").text
+    admin.post("/inbox/read", data={"alert_id": "all", "csrf_token": _tok(admin, "/inbox")})
+    assert 'class="dot"' not in admin.get("/").text
+    engine.undo_run(conn, r2, "kev")
+    assert conn.execute("SELECT COUNT(*) FROM alerts").fetchone()[0] == 1

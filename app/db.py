@@ -120,6 +120,23 @@ CREATE TABLE IF NOT EXISTS no_auto (
     at TEXT NOT NULL,
     username TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS alerts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,  -- Manager / Admin inbox
+    created_at TEXT NOT NULL,
+    account_id INTEGER,
+    run_id INTEGER,
+    severity TEXT NOT NULL DEFAULT 'warning',
+    title TEXT NOT NULL,
+    body TEXT NOT NULL DEFAULT '',
+    created_by TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS ix_alerts_run ON alerts(run_id);
+CREATE TABLE IF NOT EXISTS alert_reads (
+    alert_id INTEGER NOT NULL,
+    username TEXT NOT NULL,
+    read_at TEXT NOT NULL,
+    PRIMARY KEY (alert_id, username)
+);
 CREATE TABLE IF NOT EXISTS settings (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL

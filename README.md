@@ -161,6 +161,22 @@ For every matched collection that has a transaction ID on both sides, the last 4
 the right payment. An Info line shows how many were verified. Day-total (pooled), sweep, NACH and cash matches are
 not checked.
 
+### Next-day timing differences and the inbox
+
+Anything that reaches the bank after the branch closes, or that the ERP books the next morning (NACH, auto-debits,
+charges), is posted on the next working day. So on its own day a line found on one side only is a **warning**
+("to be booked / credited next working day"), not an exception. If it is still open after the next working day's
+files, it escalates: bank debits Critical, bank credits and book entries High (book entries Critical after 3 working
+days). Debits from a collection account stay Critical at once, because only sweeps should leave it.
+
+Entries the branch books the next day **with the earlier date** do not appear in the next bank book; they only
+change its opening balance. When that change equals bank lines left open the day before, the app closes those lines
+as "Booked late in the ERP with the earlier date" and lets the operator's run go through with a warning, with no
+Manager approval needed. Any other opening difference still needs a Manager.
+
+Every run with timing differences, late-booked entries or lines not cleared by the next working day puts a message
+in the **Inbox** (bell at the top, and in the menu) of every Manager and Admin. Operators do not see the inbox.
+
 ### Late-night lines dated the next day
 
 SIB and ICICI statements often end with a line just after midnight that is dated the next day. That line is left out
