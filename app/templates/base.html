@@ -1,22 +1,23 @@
 <!doctype html>
 {% from "_icons.html" import icon %}
+{% from "_brand.html" import lockup %}
 <html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{% block title %}Bank Reconciliation{% endblock %}</title>
-<link rel="stylesheet" href="{{ base }}/static/style.css">
-<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='8' fill='%23FC3B00'/><text x='16' y='21' font-size='13' text-anchor='middle' fill='%23FFFFFF' font-family='Helvetica Neue,Helvetica,Arial,sans-serif' font-weight='600'>KG</text></svg>">
+<link rel="stylesheet" href="{{ base }}/static/fonts.css?v={{ asset_v }}">
+<link rel="stylesheet" href="{{ base }}/static/style.css?v={{ asset_v }}">
+<link rel="icon" type="image/png" sizes="32x32" href="{{ base }}/static/brand/favicon-32.png">
+<link rel="apple-touch-icon" href="{{ base }}/static/brand/apple-touch-icon.png">
 </head>
 <body>
 {% if user %}
 {% set p = request.url.path[base|length:] or '/' %}
 <div class="shell">
   <aside class="sidebar" id="side">
-    <a class="org" href="{{ base }}/">
-      <span class="logo">KG</span>
-      <span class="orgtext"><span class="orgname">Kavitha Group</span><span class="orgsub">Bank Reconciliation</span></span>
-    </a>
+    <a class="org" href="{{ base }}/" aria-label="Kavitha Group · Bank Reconciliation, dashboard">{{ lockup('dark', 'sm', tagline=False) }}</a>
+    <div class="product">Bank Reconciliation</div>
     <nav class="sidenav">
       <a href="{{ base }}/" class="{{ 'on' if p == '/' }}">{{ icon('dashboard') }}<span>Dashboard</span></a>
       {% if can('reconcile') %}<a href="{{ base }}/reconcile" class="{{ 'on' if p.startswith('/reconcile') }}">{{ icon('reconcile') }}<span>New reconciliation</span></a>{% endif %}
@@ -61,6 +62,6 @@
 {% else %}
   {% block auth %}{% endblock %}
 {% endif %}
-<script src="{{ base }}/static/app.js"></script>
+<script src="{{ base }}/static/app.js?v={{ asset_v }}"></script>
 </body>
 </html>

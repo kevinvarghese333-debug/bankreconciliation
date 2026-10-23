@@ -1,0 +1,12 @@
+{# Kavitha Group lockup: gold mark (from the brand manual, never redrawn) + Manrope wordmark + tagline.
+   Wordmark cap height = 0.64 x mark height; gap = 0.27 x mark height (manual, section 04).
+   On ink at small sizes the manual uses the compact lockup without the tagline. #}
+{% macro lockup(tone='dark', size='md', tagline=True) -%}
+<span class="lockup {{ tone }} {{ size }}">
+  <img class="mark" src="{{ base }}/static/brand/kvg_mark_gold.png" alt="" width="165" height="144">
+  <span class="lockup-text">
+    <span class="wordmark" aria-label="Kavitha group"><span class="w1">Kavitha</span><span class="w2">group</span></span>
+    {% if tagline %}<span class="tagline">Built on trust</span>{% endif %}
+  </span>
+</span>
+{%- endmacro %}

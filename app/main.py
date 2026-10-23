@@ -92,6 +92,7 @@ templates.env.filters["inr"] = lambda v: "" if v is None or v == "" else inr(flo
 templates.env.filters["dmy"] = _dmy
 templates.env.globals["now"] = datetime.now
 templates.env.globals["base"] = ROOT_PATH
+templates.env.globals["asset_v"] = str(int(max(p.stat().st_mtime for p in (BASE / "static").rglob("*") if p.is_file())))
 
 
 @app.middleware("http")
@@ -100,7 +101,10 @@ async def security_headers(request: Request, call_next):
     resp.headers["X-Frame-Options"] = "DENY"
     resp.headers["X-Content-Type-Options"] = "nosniff"
     resp.headers["Referrer-Policy"] = "no-referrer"
-    resp.headers["Cache-Control"] = "no-store"
+    if "/static/" in request.url.path:   # fonts, logo, css (css/js links carry ?v=<build> so updates show at once)
+        resp.headers["Cache-Control"] = "public, max-age=604800"
+    else:
+        resp.headers["Cache-Control"] = "no-store"
     return resp
 
 
