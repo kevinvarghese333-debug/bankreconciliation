@@ -6,9 +6,10 @@ and every run can be reproduced or undone (latest first, in order).
 from __future__ import annotations
 
 import json
+import sqlite3
 import threading
 from collections import defaultdict
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 
 from . import db
 from .matcher import Matcher, build_flags, compute_brs, find_subset, TOL, BIG_CREDIT, named_in_narration
@@ -867,6 +868,33 @@ def _delete_run(conn, run_id: int) -> None:
     conn.execute("DELETE FROM runs WHERE id=?", (run_id,))
     conn.execute("DELETE FROM alert_reads WHERE alert_id IN (SELECT id FROM alerts WHERE run_id=?)", (run_id,))
     conn.execute("DELETE FROM alerts WHERE run_id=?", (run_id,))
+
+
+RESET_TABLES = ("alert_reads", "alerts", "reviews", "no_auto", "revoked_runs", "items", "matches", "runs")
+
+
+def reset_all(conn, user: str, backup_dir) -> dict:
+    """Clear every reconciliation (runs, matched/open items, reviews, alerts) so the team can start again from a
+    date of their choice. Users, bank accounts, holidays, settings and the audit log stay. A full copy of the
+    database is written to `backup_dir` first, so nothing is lost."""
+    from pathlib import Path
+    backup_dir = Path(backup_dir)
+    backup_dir.mkdir(parents=True, exist_ok=True)
+    stamp = datetime.now().strftime("%Y-%m-%d_%H%M%S")
+    target = backup_dir / f"before-reset_{stamp}.sqlite3"
+    dst = sqlite3.connect(target)
+    try:
+        conn.backup(dst)
+    finally:
+        dst.close()
+    counts = {t: conn.execute(f"SELECT COUNT(*) FROM {t}").fetchone()[0] for t in RESET_TABLES}
+    with db.tx(conn):
+        for t in RESET_TABLES:
+            conn.execute(f"DELETE FROM {t}")
+        db.audit(conn, user, "reset_all",
+                 f"All reconciliations cleared ({counts['runs']} run(s), {counts['items']} line(s), "
+                 f"{counts['reviews']} review(s), {counts['alerts']} alert(s)). Backup: {target.name}")
+    return {"backup": str(target), **counts}
 
 
 def undo_run(conn, run_id: int, user: str) -> None:

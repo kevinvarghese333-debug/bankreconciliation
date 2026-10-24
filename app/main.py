@@ -30,6 +30,22 @@ ROOT_PATH = "/" + os.environ.get("ROOT_PATH", "").strip("/") if os.environ.get("
 db.init()
 _c = db.connect()
 auth.ensure_env_user(_c)
+# One-time (24-10-2026): reset every reconciliation done so far; the team starts afresh from a date of their choice.
+# Users, accounts, holidays and the audit log stay; a full database backup is kept in data/backups first.
+try:
+    if not db.get_setting(_c, "reset_all_2026_10_24"):
+        _r = engine.reset_all(_c, "system (reset requested by Kev)", db.DATA_DIR / "backups")
+        db.set_setting(_c, "reset_all_2026_10_24", db.now())
+        if (db.DATA_DIR / "uploads").exists():          # kept copies of earlier uploads go with the backup
+            shutil.move(str(db.DATA_DIR / "uploads"), str(db.DATA_DIR / "backups" / "uploads-before-reset"))
+        shutil.rmtree(STAGING, ignore_errors=True)
+        print("reset done:", _r)
+        # the one-time re-checks below refer to the old runs; nothing left for them to do
+        for _k in ("recheck_2026_10_03", "recheck_2026_10_20", "timing_rules_2026_10_21"):
+            if not db.get_setting(_c, _k):
+                db.set_setting(_c, _k, db.now())
+except Exception as _e:  # never stop the app from starting
+    print("reset skipped:", _e)
 # One-time (20-10-2026): the ICICI collection account (NACH, dynamic UPI); its balance is swept to SIB …1113.
 try:
     if not db.get_setting(_c, "seed_icici_0993"):
