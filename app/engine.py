@@ -6,6 +6,7 @@ and every run can be reproduced or undone (latest first, in order).
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 import threading
 from collections import defaultdict
@@ -94,6 +95,7 @@ def cumulative_opening_diff(conn, account_id: int, upto_run: int | None = None) 
 
 
 LATE_METHOD = "Booked late in the ERP with the earlier date"
+OPERATOR_ACK = {"FIRST_RUN"}   # warnings an Operator may confirm alone (Managers and Admins are alerted)
 TIMING_CODES = ("TIMING_BANK_DEBIT", "TIMING_BANK_CREDIT", "TIMING_BOOK_PAYMENT", "TIMING_BOOK_RECEIPT")
 ESCALATED_CODES = ("BANK_DEBIT_NOT_IN_BOOK", "BANK_CREDIT_NOT_IN_BOOK", "BOOK_PAYMENT_NOT_IN_BANK",
                    "BOOK_RECEIPT_NOT_IN_BANK")
@@ -536,10 +538,18 @@ def _reconcile(conn, account_id, bank_path, bank_name, book_path, book_name, use
             add("error", "ACCOUNT_KIND",
                 "This statement has RAP (bank API) disbursals, which only the main account should have. "
                 "Check you picked the right account.")
-        add("warning", "FIRST_RUN",
-            f"First reconciliation for {acc['nickname']} (…{acc['acc_no'][-4:]}). The statement has no account "
-            f"number printed, so confirm it is for this account: bank opening balance ₹{inr(bank['opening'])} "
-            f"on {bank['period_from']:%d-%m-%Y}. Every later day must continue from this.", can_ack=True)
+        stmt_no = re.sub(r"\D", "", bank.get("account_no") or "")
+        acc_no = re.sub(r"\D", "", acc["acc_no"] or "")
+        if len(stmt_no) >= 4 and len(acc_no) >= 4 and (stmt_no.endswith(acc_no) or acc_no.endswith(stmt_no)):
+            add("ok", "FIRST_RUN",
+                f"First reconciliation for {acc['nickname']}: the statement's account number {bank['account_no']} "
+                f"matches. Starting point: bank opening balance ₹{inr(bank['opening'])} on "
+                f"{bank['period_from']:%d-%m-%Y}. Every later day must continue from this.")
+        else:
+            add("warning", "FIRST_RUN",
+                f"First reconciliation for {acc['nickname']} (…{acc['acc_no'][-4:]}). The statement has no account "
+                f"number printed, so confirm it is for this account: bank opening balance ₹{inr(bank['opening'])} "
+                f"on {bank['period_from']:%d-%m-%Y}. Every later day must continue from this.", can_ack=True)
 
     # --- the identity that must hold at the opening of the period
     prior_diff = cumulative_opening_diff(conn, account_id)
@@ -664,6 +674,14 @@ def _reconcile(conn, account_id, bank_path, bank_name, book_path, book_name, use
             conn.execute(f"UPDATE items SET match_id=? WHERE id IN ({','.join('?' * len(keys))})", (mid, *keys))
         refresh_run(conn, run_id)
         alert_for_run(conn, run_id, user)
+        if ackable and acknowledged:
+            conn.execute("INSERT INTO alerts (created_at, account_id, run_id, severity, title, body, created_by) "
+                         "VALUES (?,?,?,?,?,?,?)",
+                         (db.now(), account_id, run_id, "warning" if all(c["code"] in OPERATOR_ACK for c in ackable)
+                          else "high",
+                          f"{acc['nickname']} (…{acc['acc_no'][-4:]}) · {p_to:%d-%m-%Y}: warning(s) confirmed by {user}",
+                          "\n".join(f"· {c['message']}" for c in ackable) + f"\nReason given: {ack_reason.strip()}",
+                          user))
         db.audit(conn, user, "reconcile",
                  f"Run #{run_id} · {acc['nickname']} · {p_from}..{p_to} · bank {bank_name} · book {book_name}"
                  + (f" · acknowledged: {ack_reason.strip()}" if ackable else ""))

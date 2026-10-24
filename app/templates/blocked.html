@@ -36,7 +36,7 @@
 </form>
 {% endif %}
 
-{% if ackable and not can('ack') %}
+{% if ackable and not can('ack') and not operator_ack %}
 <div class="panel" style="border-color:#e8c46a;background:var(--warn-soft)">
   <h2>A Manager or Admin must confirm this</h2>
   <p style="margin:0">These warnings can only be overridden by a Manager or Admin. Ask one of them to upload the same two
@@ -48,7 +48,7 @@
   <input type="hidden" name="csrf_token" value="{{ csrf }}">
   <input type="hidden" name="token" value="{{ token }}">
   <h2>Proceed anyway?</h2>
-  <p class="muted" style="margin-top:0">These items can be overridden if you understand why they happened. Your reason is saved in the audit log and printed on the BRS.</p>
+  <p class="muted" style="margin-top:0">These items can be overridden if you understand why they happened. Your reason is saved in the audit log and printed on the BRS{% if not can('ack') %}, and Managers and Admins get an inbox alert{% endif %}.</p>
   <ul>{% for a in ackable %}<li>{{ a.message }}</li>{% endfor %}</ul>
   <div class="field"><label for="r">Reason</label><input id="r" type="text" name="reason" required minlength="15" placeholder="e.g. Confirmed this is the SIB …1113 statement for the date"></div>
   <div class="actions">

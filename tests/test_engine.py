@@ -1033,12 +1033,50 @@ def test_inbox_alerts_managers_not_operators(conn, tmp_path):
                       [dict(vno=1, name="ASHA", loan_ac="1", instr="1111", receipt=300)])
     r2, _, _ = _day(conn, tmp_path, 2, d2, bc, [_upi("626900002222", "BINU", 200)],
                     [dict(vno=3, name="BINU", loan_ac="2", instr="2222", receipt=200)], book_op=round(kc - 59, 2))
-    titles = [r[0] for r in conn.execute("SELECT title FROM alerts ORDER BY id")]
+    titles = [r[0] for r in conn.execute("SELECT title FROM alerts WHERE title NOT LIKE '%confirmed by%' ORDER BY id")]
     assert len(titles) == 2 and "timing difference" in titles[0] and "booked late" in titles[1]
     assert op.get("/inbox").status_code == 303 and 'class="dot"' not in op.get("/").text   # operators: no inbox
     page = admin.get("/inbox").text
-    assert "booked late" in page and "Mark all read" in page and 'class="dot">2<' in admin.get("/").text
+    assert "booked late" in page and "Mark all read" in page and 'class="dot">3<' in admin.get("/").text
     admin.post("/inbox/read", data={"alert_id": "all", "csrf_token": _tok(admin, "/inbox")})
     assert 'class="dot"' not in admin.get("/").text
     engine.undo_run(conn, r2, "kev")
-    assert conn.execute("SELECT COUNT(*) FROM alerts").fetchone()[0] == 1
+    assert conn.execute("SELECT COUNT(*) FROM alerts").fetchone()[0] == 2           # day 1 alerts stay
+
+
+def test_operator_confirms_first_day_and_managers_are_alerted(conn, tmp_path):
+    admin = _client_setup()
+    t = _tok(admin, "/admin")
+    admin.post("/admin/users", data={"username": "neethu", "full_name": "Neethu", "role": "operator",
+                                     "password": "Temp-pass-123", "csrf_token": t})
+    op, _ = _login("neethu", "Temp-pass-123")
+    op.post("/password", data={"current": "Temp-pass-123", "new": "neethu-own-pw1", "new2": "neethu-own-pw1",
+                               "csrf_token": _tok(op, "/me")})
+    d = date(2026, 10, 19)
+    b, k = tmp_path / "b.xlsx", tmp_path / "k.xlsx"
+    write_statement(b, d, 1000, [_upi("626900001111", "ASHA", 100)])
+    write_book(k, d, 1000, [dict(vno=1, name="ASHA", loan_ac="1", instr="1111", receipt=100)])
+    t = _tok(op, "/reconcile")
+    r = op.post("/reconcile", data={"account_id": "1", "csrf_token": t, "confirm_backdated": "1"},
+                files={"bank_file": ("b.xlsx", b.read_bytes()), "book_file": ("k.xlsx", k.read_bytes())})
+    assert "Proceed anyway?" in r.text and "A Manager or Admin must confirm" not in r.text
+    import re as _re
+    token = _re.search(r'name="token" value="([^"]+)"', r.text).group(1)
+    r = op.post("/reconcile/ack", data={"token": token, "reason": "Aloor mini statement, starting point agreed",
+                                        "csrf_token": _tok(op, "/reconcile")})
+    assert r.status_code == 303 and "/runs/" in r.headers["location"]
+    al = conn.execute("SELECT title, body FROM alerts").fetchall()
+    assert any("confirmed by neethu" in a[0] and "starting point agreed" in a[1] for a in al)
+
+
+def test_first_day_with_matching_account_number_needs_no_confirmation(conn, tmp_path):
+    from app.parsers import parse_bank_statement
+    S = "/tmp/claude-0/-home-claude/0d0f0921-aaea-52b2-8732-a729caf91e89/scratchpad/in29/"
+    import os
+    if not os.path.exists(S + "stmt.xls"):
+        pytest.skip("real 29-09 statement not available")
+    conn.execute("UPDATE accounts SET acc_no='0058073000001113' WHERE id=1")
+    try:
+        engine.reconcile(conn, 1, S + "stmt.xls", "stmt.xls", S + "book.xlsx", "book.xlsx", "op", confirmed=True)
+    except engine.Blocked as e:
+        assert "FIRST_RUN" not in {c["code"] for c in e.ackable}       # only the opening difference remains

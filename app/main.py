@@ -628,7 +628,12 @@ def _finish_upload(request, token, meta, acknowledged=False, reason=""):
             acc = c.execute("SELECT * FROM accounts WHERE id=?", (meta["account_id"],)).fetchone()
             last = engine.latest_run(c, meta["account_id"])
             book_gap = any(ch["code"] == "BOOK_CONTINUITY" and ch["level"] != "ok" for ch in e.checks)
+            # an Operator may confirm a first day (starting point) alone; anything else needs a Manager
+            hard = [ch for ch in e.checks if ch["level"] == "error" and ch not in e.ackable]
+            meta["operator_ack"] = bool(e.ackable) and not hard and all(ch["code"] in engine.OPERATOR_ACK for ch in e.ackable)
+            (folder / "meta.json").write_text(json.dumps(meta))
             return render(request, "blocked.html", checks=e.checks, ackable=e.ackable, token=token,
+                          operator_ack=meta["operator_ack"],
                           account=dict(acc), meta=meta, book_gap=book_gap,
                           last_to=last["period_to"] if last else None)
         except Exception as e:  # unreadable file etc.
@@ -960,8 +965,8 @@ def reconcile_ack(request: Request, token: str = Form(...), reason: str = Form("
     meta = json.loads(mp.read_text())
     if meta.get("user") != user(request):
         return redirect("/reconcile", ("error", "Upload belongs to another session."), request)
-    if not roles.can(request.state.role, "ack"):
-        return redirect("/reconcile", ("error", "Only a Manager or Admin can acknowledge warnings."), request)
+    if not roles.can(request.state.role, "ack") and not meta.get("operator_ack"):
+        return redirect("/reconcile", ("error", "Only a Manager or Admin can acknowledge these warnings."), request)
     return _finish_upload(request, token, meta, True, reason)
 
 
