@@ -16,7 +16,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from starlette.middleware.sessions import SessionMiddleware
 
-from . import accounts_import, auth, batch, db, engine, report, roles
+from . import accounts_import, auth, batch, db, engine, report, roles, sso
 from .parsers import inr
 
 BASE = Path(__file__).resolve().parent
@@ -214,6 +214,9 @@ def _start_session(request: Request, c, username: str) -> None:
     request.session.clear()
     request.session["user"] = username
     request.session["nonce"] = nonce
+
+
+app.include_router(sso.make_router(_start_session, ROOT_PATH))
 
 
 def accounts_overview(c):
