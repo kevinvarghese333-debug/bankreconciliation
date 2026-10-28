@@ -177,6 +177,16 @@ Manager approval needed. Any other opening difference still needs a Manager.
 Every run with timing differences, late-booked entries or lines not cleared by the next working day puts a message
 in the **Inbox** (bell at the top, and in the menu) of every Manager and Admin. Operators do not see the inbox.
 
+### Days with no transactions (blank statements)
+
+Some branches' statements for a day with no transactions are blank: only the bank's details, no rows and no
+opening or closing balance. Upload them as usual. The app reads the day as "no entries", takes the bank balance as
+the previous day's closing, and:
+- passes the day when the bank book also has no entries ("No entries on either side");
+- warns when the bank book has entries for that day (they stay open until the bank shows them);
+- stops when the date printed on the blank statement is not the bank book's date, or when the blank day would be
+  the account's first reconciled day (no balance to start from).
+
 ### Late-night lines dated the next day
 
 SIB and ICICI statements often end with a line just after midnight that is dated the next day. That line is left out

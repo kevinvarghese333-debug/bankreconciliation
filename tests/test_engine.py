@@ -1080,3 +1080,71 @@ def test_first_day_with_matching_account_number_needs_no_confirmation(conn, tmp_
         engine.reconcile(conn, 1, S + "stmt.xls", "stmt.xls", S + "book.xlsx", "book.xlsx", "op", confirmed=True)
     except engine.Blocked as e:
         assert "FIRST_RUN" not in {c["code"] for c in e.ackable}       # only the opening difference remains
+
+
+def _blank_statement(path, d=None, header=True, acc="0058073000001113"):
+    """A day with no transactions as some SIB branches download it: bank details only."""
+    import openpyxl
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.append(["THE SOUTH INDIAN BANK LTD"])
+    ws.append(["Branch: NORTH PARAVUR", None, "IFSC: SIBL0000058"])
+    ws.append([f"Account No : {acc}"])
+    if d:
+        ws.append([f"Statement of account for the period {d:%d-%m-%Y} to {d:%d-%m-%Y}"])
+    if header:
+        ws.append(["SlNo", "Transaction Date", "Value Date", "Particulars", None, "Cheque Number",
+                   "Withdrawals", None, "Deposits", "Balance Amount"])
+    wb.save(path)
+
+
+def test_blank_statement_day_with_empty_book_is_fine(conn, tmp_path):
+    from app.parsers import parse_bank_statement
+    d1, d2, d3 = date(2026, 10, 26), date(2026, 10, 27), date(2026, 10, 28)
+    conn.execute("UPDATE accounts SET acc_no='0058073000001113' WHERE id=1")
+    r1, bc, kc = _day(conn, tmp_path, 1, d1, 5000, [_upi("626900001111", "ASHA", 300)],
+                      [dict(vno=1, name="ASHA", loan_ac="1", instr="1111", receipt=300)])
+    b2, k2 = tmp_path / "blank.xlsx", tmp_path / "k2.xlsx"
+    for hdr in (True, False):                                   # with or without the column header row
+        _blank_statement(b2, d2, header=hdr)
+        st = parse_bank_statement(b2)
+        assert st["ok"] and st["blank"] and st["account_no"] == "0058073000001113" and d2 in st["dates_printed"]
+    _blank_statement(b2, d2)
+    write_book(k2, d2, kc, [])
+    r2 = run(conn, 1, b2, k2)
+    row = conn.execute("SELECT * FROM runs WHERE id=?", (r2,)).fetchone()
+    assert row["bank_open"] == bc and row["bank_close"] == bc
+    assert any(c["code"] == "NO_ENTRIES_EITHER_SIDE" for c in json.loads(row["checks_json"]))
+    assert brs(conn, r2)["clean"]
+    r3, _, _ = _day(conn, tmp_path, 3, d3, bc, [_upi("626900002222", "BINU", 200)],
+                    [dict(vno=2, name="BINU", loan_ac="2", instr="2222", receipt=200)], book_op=kc)
+    assert brs(conn, r3)["clean"]                               # the next day continues from the blank day
+
+
+def test_blank_statement_but_book_has_entries_is_flagged(conn, tmp_path):
+    d1, d2 = date(2026, 10, 26), date(2026, 10, 27)
+    r1, bc, kc = _day(conn, tmp_path, 1, d1, 5000, [_upi("626900001111", "ASHA", 300)],
+                      [dict(vno=1, name="ASHA", loan_ac="1", instr="1111", receipt=300)])
+    b2, k2 = tmp_path / "blank.xlsx", tmp_path / "k2.xlsx"
+    _blank_statement(b2, d2, acc="1113")
+    write_book(k2, d2, kc, [dict(vno=2, name="BINU", loan_ac="2", instr="2222", receipt=200)])
+    r2 = run(conn, 1, b2, k2)
+    row = conn.execute("SELECT * FROM runs WHERE id=?", (r2,)).fetchone()
+    assert any(c["code"] == "BANK_BLANK_BOOK_HAS_ENTRIES" for c in json.loads(row["checks_json"]))
+    assert "TIMING_BOOK_RECEIPT" in codes(conn, r2)
+
+
+def test_blank_statement_first_day_or_wrong_date_is_stopped(conn, tmp_path):
+    b, k = tmp_path / "blank.xlsx", tmp_path / "k.xlsx"
+    _blank_statement(b, date(2026, 10, 27), acc="1113")
+    write_book(k, date(2026, 10, 27), 1000, [])
+    with pytest.raises(engine.Blocked) as e:
+        engine.reconcile(conn, 1, str(b), "b", str(k), "k", "t", confirmed=True)
+    assert "BANK_BLANK_FIRST" in {c["code"] for c in e.value.checks}
+    r1, bc, kc = _day(conn, tmp_path, 1, date(2026, 10, 26), 5000, [_upi("626900001111", "ASHA", 300)],
+                      [dict(vno=1, name="ASHA", loan_ac="1", instr="1111", receipt=300)])
+    _blank_statement(b, date(2026, 10, 25), acc="1113")          # statement downloaded for the wrong day
+    write_book(k, date(2026, 10, 27), kc, [])
+    with pytest.raises(engine.Blocked) as e:
+        engine.reconcile(conn, 1, str(b), "b2", str(k), "k2", "t", confirmed=True)
+    assert "BANK_BLANK_DATE" in {c["code"] for c in e.value.checks}

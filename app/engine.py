@@ -393,6 +393,42 @@ def _reconcile(conn, account_id, bank_path, bank_name, book_path, book_name, use
         if can_ack:
             ackable.append(c)
 
+    # --- a blank statement (no transactions, no balances printed): the bank balance did not move
+    if bank.get("blank"):
+        prev = latest_run(conn, account_id)
+        if bank["opening"] is None:
+            if not prev:
+                raise Blocked(checks + [dict(check(
+                    "error", "BANK_BLANK_FIRST",
+                    "The bank statement is blank (no transactions and no balance printed), so it cannot be the first "
+                    "day reconciled for this account. Start from a day that has transactions, then upload blank days "
+                    "as they come."), source="Cross-check")], [])
+            bank["opening"] = bank["closing"] = prev["bank_close"]
+        printed = bank.get("dates_printed") or []
+        if printed and not (min(printed) <= book["period_from"] and book["period_to"] <= max(printed)):
+            checks.append(dict(check(
+                "error", "BANK_BLANK_DATE",
+                f"The blank bank statement is for {', '.join(f'{d:%d-%m-%Y}' for d in printed[:3])}, but the bank book is "
+                f"for {book['period_from']:%d-%m-%Y}" + (f" to {book['period_to']:%d-%m-%Y}" if book['period_to'] != book['period_from'] else "")
+                + ". Download the statement for the same date."), source="Cross-check"))
+            raise Blocked(checks, [])
+        n_book = len(book["rows"])
+        if n_book == 0:
+            checks.append(dict(check(
+                "ok", "NO_ENTRIES_EITHER_SIDE",
+                f"No entries on either side for {book['period_from']:%d-%m-%Y}: the bank statement is blank and the "
+                f"bank book has no entries. Nothing to reconcile; bank balance stays ₹{inr(bank['closing'])}."),
+                source="Cross-check"))
+        else:
+            rec = sum(r["receipt"] for r in book["rows"])
+            pay = sum(r["payment"] for r in book["rows"])
+            checks.append(dict(check(
+                "warning", "BANK_BLANK_BOOK_HAS_ENTRIES",
+                f"The bank statement is blank, but the bank book has {n_book} entr{'y' if n_book == 1 else 'ies'} "
+                f"(receipts ₹{inr(rec)}, payments ₹{inr(pay)}). The bank shows nothing for that day: check the "
+                "statement was downloaded for the right date and account. The entries stay open until the bank "
+                "shows them."), source="Cross-check"))
+
     # --- the two files must be for the same account and period
     if bank["account_no"] and not bank["account_no"].rstrip("*Xx").endswith(acc["acc_no"][-4:]):
         add("error", "ACCOUNT_MISMATCH",

@@ -45,6 +45,8 @@ def classify(path: str, name: str) -> dict:
         info["error"] = "Not a bank statement or an ERP bank book."
         return info
     dates = sorted({r["date"] for r in st.get("rows", [])})
+    if st.get("blank") and st.get("dates_printed"):   # blank day: pair it by the date printed on it
+        dates = [st["dates_printed"][0], st["dates_printed"][-1]]
     info.update(kind="statement", date_from=dates[0] if dates else None, date_to=dates[-1] if dates else None,
                 opening=st.get("opening"))
     rows = st.get("rows", [])

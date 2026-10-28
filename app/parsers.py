@@ -237,13 +237,54 @@ def parse_narration(text: str) -> dict:
 
 # --------------------------------------------------------------------------- bank statement
 
+STATEMENT_WORDS = re.compile(r"\b(bank|statement|account|a/c|branch|ifsc|customer|cif|period)\b", re.I)
+
+
+def _blank_statement(df, acc_no: str = "", brought_forward=None) -> dict | None:
+    """A statement for a day with no transactions: some branches' downloads carry only the bank's details
+    (no rows, no opening or closing balance). Returns that reading, or None if this does not look like a
+    bank statement at all."""
+    text = " ".join(str(c) for row in df.itertuples(index=False) for c in row if not pd.isna(c)) if df is not None else ""
+    if df is not None and len(text.strip()) and not STATEMENT_WORDS.search(text):
+        return None
+    if not acc_no:
+        m = re.search(r"(?:a/?c|account)\s*(?:no\.?|number)?\s*[:\-]?\s*([0-9Xx*]{6,})", text, re.I)
+        acc_no = m.group(1) if m else ""
+    bal = brought_forward
+    printed = []
+    for d_, m_, y_ in re.findall(r"\b(\d{1,2})[-/.](\d{1,2}|[A-Za-z]{3})[-/.](\d{4})\b", text):
+        try:
+            mm = int(m_) if m_.isdigit() else datetime.strptime(m_[:3].title(), "%b").month
+            printed.append(date(int(y_), mm, int(d_)))
+        except ValueError:
+            pass
+    return {
+        "ok": True, "blank": True, "rows": [], "account_no": acc_no, "dates_printed": sorted(set(printed)),
+        "opening": bal, "closing": bal, "total_withdrawals": 0.0, "total_deposits": 0.0,
+        "period_from": None, "period_to": None,
+        "checks": [check("ok", "BANK_BLANK",
+                         "The statement has no transactions" + (f" (balance B/F {inr(bal)})." if bal is not None else
+                         " and prints no opening or closing balance: read as a day with no entries."))],
+    }
+
+
 def parse_bank_statement(path: str | Path) -> dict:
     checks: list[dict] = []
-    df = read_sheet(path)
+    try:
+        df = read_sheet(path)
+    except Exception:  # an empty download can have no sheet content at all
+        df = None
+    if df is None or df.empty:
+        return _blank_statement(df)
     hdr = _find_header(df, [["particulars", "narration", "description", "remarks", "transactiondetails", "tranparticular"],
                             ["balance", "balanceamount", "closingbalance", "balamt"],
                             ["withdrawal", "withdrawals", "debit", "dr", "withdrawalamt", "drtranamt"]])
     if hdr is None:
+        blank = _blank_statement(df)
+        amounts = sum(1 for row in df.itertuples(index=False) for c in row
+                      if not pd.isna(c) and re.fullmatch(r"\s*-?[\d,]+\.\d{2}\s*(cr|dr)?\s*", str(c), re.I))
+        if blank and amounts < 5:
+            return blank          # bank details only, no transactions: a day with no entries
         return {"ok": False, "checks": [check("error", "BANK_HEADER",
                 "Could not find the column header row (Particulars / Withdrawals / Deposits / Balance) "
                 "in the bank statement. Is this the right file?")], "rows": []}
@@ -349,8 +390,10 @@ def parse_bank_statement(path: str | Path) -> dict:
                             f"{len(bad_rows)} row(s) could not be read (Excel rows {bad_rows[:10]}). "
                             "The statement may be edited or corrupted."))
     if not rows:
-        checks.append(check("error", "BANK_EMPTY", "No transactions found in the bank statement."))
-        return {"ok": False, "rows": [], "checks": checks}
+        if bad_rows:
+            checks.append(check("error", "BANK_EMPTY", "No transactions could be read from the bank statement."))
+            return {"ok": False, "rows": [], "checks": checks}
+        return _blank_statement(df, acc_no, brought_forward)   # header printed, but no transactions that day
 
     # Some banks list newest first: detect by checking continuity both ways
     def breaks(seq):
