@@ -46,6 +46,19 @@ try:
                 db.set_setting(_c, _k, db.now())
 except Exception as _e:  # never stop the app from starting
     print("reset skipped:", _e)
+# One-time (16-11-2026): full fresh start requested by Kev. Clears every reconciliation (admin and staff side:
+# runs, items, matches, reviews, sign-offs, alerts, revoked archive) and every uploaded file (kept uploads, bulk
+# staging, uploads kept by the October reset). Users, accounts, holidays and the audit log stay. One database
+# backup is written to data/backups first; earlier database backups stay there too.
+try:
+    if not db.get_setting(_c, "reset_all_2026_11_16"):
+        _r = engine.reset_all(_c, "system (fresh start requested by Kev)", db.DATA_DIR / "backups")
+        db.set_setting(_c, "reset_all_2026_11_16", db.now())
+        for _d in (db.DATA_DIR / "uploads", STAGING, db.DATA_DIR / "backups" / "uploads-before-reset"):
+            shutil.rmtree(_d, ignore_errors=True)
+        print("fresh start done:", _r)
+except Exception as _e:  # never stop the app from starting
+    print("fresh start skipped:", _e)
 # One-time (20-10-2026): the ICICI collection account (NACH, dynamic UPI); its balance is swept to SIB …1113.
 try:
     if not db.get_setting(_c, "seed_icici_0993"):
