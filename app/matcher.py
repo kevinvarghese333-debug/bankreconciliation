@@ -260,6 +260,8 @@ class Matcher:
             if direction == "out":
                 self.renewal_pass()
             self.group_passes(direction)
+            if direction == "in":
+                self.jlg_group_pass()
             floor = PARTIAL if direction == "out" else PARTIAL_IN
             self.pair_pass(direction,
                            lambda b, k, floor=floor: s if (s := name_score(b["name"], k["name"])) >= floor else None,
@@ -284,6 +286,8 @@ class Matcher:
         held = defaultdict(list)     # credits from holidays, due in the next working day's book
         books = defaultdict(list)
         for b in self.free(self.bank, "in"):
+            if b.get("after_hours") and (b.get("carried") or b.get("opening_line")):
+                continue                     # handled below with the day they are booked
             if b["date"] in self.holidays:
                 d = b["date"] + timedelta(days=1)
                 while d in self.holidays and (d - b["date"]).days < 10:
@@ -294,16 +298,43 @@ class Matcher:
         for k in self.free(self.book, "in"):
             if not k.get("carried"):
                 books[k["date"]].append(k)
+        # after-hours credits of an earlier day (carried, or the first day's opening line): the branch books them
+        # on the next working day, so they belong to that day's total
+        prev_late = defaultdict(list)
+        for b in self.free(self.bank, "in"):
+            if b.get("after_hours") and (b.get("carried") or b.get("opening_line")):
+                x = b["date"] + timedelta(days=1)
+                while x in self.holidays and (x - b["date"]).days < 10:
+                    x += timedelta(days=1)
+                prev_late[x].append(b)
         for d, kl in books.items():
-            for bl, extra in ((banks.get(d, []), ""), (banks.get(d, []) + held.get(d, []), " (with holiday receipts)")):
-                if extra and not held.get(d):
+            day = banks.get(d, [])
+            inside = [b for b in day if not b.get("after_hours")]
+            late = [b for b in day if b.get("after_hours")]
+            pl = prev_late.get(d, [])
+            options = []
+            for base in (inside, day):
+                options += [(base, ""), (base + pl, " (with the previous evening's after-hours credits)"),
+                            (base + held.get(d, []), " (with holiday receipts)"),
+                            (base + pl + held.get(d, []), " (with holiday and after-hours credits)")]
+            seen = set()
+            for bl, extra in options:
+                sig = frozenset(b["key"] for b in bl)
+                if sig in seen or not bl:
                     continue
+                seen.add(sig)
                 if len(bl) >= 2 and len(kl) >= 2 and same_amount(sum(i["amount"] for i in bl), sum(i["amount"] for i in kl)):
                     total = sum(i["amount"] for i in bl)
+                    left = [b for b in late if b not in bl]
                     self.add(bl, kl, "Collections pooled by day total" + extra, "review",
                              f"{len(bl)} bank credits and {len(kl)} book receipts for {d:%d-%m-%Y} could not be "
                              f"paired one-to-one, but both total {total:,.2f}"
-                             + (". Includes money received on the preceding holiday." if extra else ""))
+                             + (". Includes money received on the preceding holiday." if "holiday" in extra else "")
+                             + (". Includes the previous evening's credits after the day-end sweep, booked today."
+                                if "after-hours" in extra else "")
+                             + (f". {len(left)} credit(s) after the day-end sweep (after banking hours, "
+                                f"₹{sum(b['amount'] for b in left):,.2f}) left for the next working day's book."
+                                if left else ""))
                     break
 
     def reference_pass(self, direction):
@@ -338,6 +369,7 @@ class Matcher:
         for b in banks:
             br = clean_name(b.get("branch") or b.get("name"))
             if not br:
+                self._typed_transfer(b, direction)
                 continue
             cands = []
             for k in self.free(self.book, direction):
@@ -354,6 +386,60 @@ class Matcher:
                 label = {"SWEEP": "Sweep from branch", "IB": "Inter-branch credit", "CASH": "Cash deposit"}[b["channel"]]
                 self.add([b], [k], label + " + amount", "review" if ambiguous else "strong",
                          f"{b['branch'] or b['name']}" + (" — another entry has the same amount; confirm" if ambiguous else ""))
+            else:
+                self._typed_transfer(b, direction)
+
+    def _typed_transfer(self, b, direction):
+        """The ERP entry does not name the branch, but says what it is: a day-end sweep is booked as a fund
+        transfer ("TRANSFER TO MAIN BRANCH ACCOUNT, A/c: IBV") and a counter deposit as "CASH DEPOSIT".
+        Same amount, same kind of entry, and the only such entry on the day → strong."""
+        if b["channel"] == "SWEEP":
+            kind, label = OWN_TRANSFER_WORDS, ("Day-end sweep to head office" if direction == "out"
+                                               else "Sweep from branch") + " + amount"
+        elif b["channel"] == "CASH":
+            kind, label = CASH_WORDS, "Cash deposit + amount"
+        else:
+            return
+        cands = [k for k in self.free(self.book, direction) if same_amount(b["amount"], k["amount"])
+                 and self.ok_dates(b, k) and kind.search(str(k.get("text", "")).upper())]
+        same_day = [k for k in cands if k["date"] == b["date"]]
+        pick = same_day if len(same_day) == 1 else cands
+        if len(pick) == 1:
+            self.add([b], pick, label, "strong",
+                     f"Bank '{b['text'][:40]}' · ERP '{str(pick[0].get('text', ''))[:40]}' · same amount")
+
+    def jlg_group_pass(self):
+        """Joint-liability groups: one member often pays the whole group's instalments in one UPI transfer
+        (₹2,920 = 4 members × ₹730). The ERP books one receipt per member, one after another. A bank credit equal
+        to a run of consecutive group-loan receipts that includes the payer's own name is that group's payment."""
+        books = sorted((k for k in self.free(self.book, "in") if JLG_RE.search(str(k.get("text", "")).upper())),
+                       key=lambda k: (k["date"], int(k["vno"]) if str(k.get("vno", "")).isdigit() else 0))
+        for b in sorted(self.free(self.bank, "in"), key=lambda x: -x["amount"]):
+            if b["key"] in self.used or not b.get("name") or b.get("channel") not in ("UPI", "IMPS", "NEFT", ""):
+                continue
+            pool = [k for k in books if k["key"] not in self.used and k["date"] == b["date"]]
+            hits = []
+            for i in range(len(pool)):
+                tot = 0.0
+                for j in range(i, min(i + 12, len(pool))):
+                    tot = round(tot + pool[j]["amount"], 2)
+                    if tot > b["amount"] + TOL:
+                        break
+                    if j > i and same_amount(tot, b["amount"]):
+                        run = pool[i:j + 1]
+                        best = max(name_score(b["name"], k["name"]) for k in run)
+                        if best >= PARTIAL_IN:
+                            hits.append((best, run))
+            if not hits:
+                continue
+            hits.sort(key=lambda h: -h[0])
+            if len(hits) > 1 and hits[1][0] >= hits[0][0] - 3 and {k["key"] for k in hits[1][1]} != {k["key"] for k in hits[0][1]}:
+                continue   # two different groups fit equally well: leave it to the day total
+            best, run = hits[0]
+            payer = max(run, key=lambda k: name_score(b["name"], k["name"]))
+            self.add([b], run, "Group payment (JLG): one credit = several members", "strong" if best >= 85 else "review",
+                     f"{b['name']} paid ₹{b['amount']:,.2f} for {len(run)} group members "
+                     f"(vouchers {run[0]['vno']}–{run[-1]['vno']}); payer matches member '{payer['name']}'")
 
     def utr_l4_passes(self):
         """ERP 'Instrument.Det' holds the last 4 digits of the UPI reference."""
@@ -532,6 +618,9 @@ class Matcher:
                          f"'{k['name'] or k.get('narration', '')[:40]}'. Verify.")
 
 
+OWN_TRANSFER_WORDS = re.compile(r"\b(TRANSFER\w*|TRANSFERED|TRF|MAIN BRANCH|HEAD OFFICE|IBV|FUND)\b")
+CASH_WORDS = re.compile(r"\bCASH\b")
+JLG_RE = re.compile(r"\bJLG")
 BIG_CREDIT = 100000.0   # ₹1 lakh: above this a one-of-a-kind amount on the day is a fund movement, not an EMI
 OWN_COMPANY = re.compile(r"\bFREEMEN\b")
 TRANSFER_WORDS = re.compile(r"\b(TRANSFER\w*|TRANSFERED|TRF|SIB\s*1113|FUND|INTER\s*BANK)\b")
@@ -636,6 +725,12 @@ def build_flags(bank: list[dict], book: list[dict], matches: list[dict], account
                 f("medium", "TIMING_BANK_DEBIT", "Bank debit not yet in the bank book: to be booked next working day",
                   f"{b['date']:%d-%m-%Y} · ₹{inr(b['amount'])} · {who_}. Treated as a timing difference. If it is not in "
                   "the next working day's bank book it turns Critical.", [b["key"]])
+            elif b.get("after_hours"):
+                f("medium", "TIMING_BANK_CREDIT", "Credited after the day-end sweep (after banking hours): "
+                  "to be booked next working day",
+                  f"{b['date']:%d-%m-%Y} · ₹{inr(b['amount'])} · {who_}. The bank added it to this day's statement after "
+                  "the money was swept to head office, so the branch books it the next working day. If it is not in "
+                  "the next working day's bank book it turns High.", [b["key"]])
             else:
                 f("medium", "TIMING_BANK_CREDIT", "Bank credit not yet in the bank book: to be booked next working day",
                   f"{b['date']:%d-%m-%Y} · ₹{inr(b['amount'])} · {who_}. Treated as a timing difference. If it is not in "

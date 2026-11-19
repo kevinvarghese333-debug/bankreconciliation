@@ -59,6 +59,16 @@ try:
         print("fresh start done:", _r)
 except Exception as _e:  # never stop the app from starting
     print("fresh start skipped:", _e)
+# One-time (19-11-2026): runs since the fresh start re-checked with the new rules (day-end sweep "TR TO HEAD
+# OFFICE" vs ERP fund transfer, counter cash deposits, JLG group payments) for every account.
+try:
+    if not db.get_setting(_c, "recheck_2026_11_19"):
+        for _a in _c.execute("SELECT id FROM accounts ORDER BY id").fetchall():
+            if _c.execute("SELECT 1 FROM runs WHERE account_id=?", (_a["id"],)).fetchone():
+                engine.recheck_account(_c, _a["id"], "system")
+        db.set_setting(_c, "recheck_2026_11_19", db.now())
+except Exception as _e:  # never stop the app from starting
+    print("re-check skipped:", _e)
 # One-time (20-10-2026): the ICICI collection account (NACH, dynamic UPI); its balance is swept to SIB …1113.
 try:
     if not db.get_setting(_c, "seed_icici_0993"):

@@ -182,6 +182,21 @@ def parse_narration(text: str) -> dict:
         acc = re.search(r"(\d{2}\.\d{2}\.)?(\d{4})\b", m.group(1))
         out.update(channel="SWEEP", name=br, branch=br, ref=acc.group(2) if acc else "")
         return out
+    # Day-end sweep *out of* a collection account: "TR TO HEAD OFFICE 73.1113", "TR TO NORTH PARAVUR BRANCH/"
+    m = re.match(r"^\s*TR\.?\s*TO\s+(.+?)\s*/?\s*$", up)
+    if m and "/" not in m.group(1):
+        dest = re.sub(r"[\d.]+", " ", m.group(1))
+        dest = re.sub(r"\b(BRANCH|BRA|BR)\b", " ", dest)
+        dest = re.sub(r"\s+", " ", dest).strip()
+        acc = re.findall(r"(\d{4})\b", m.group(1))
+        out.update(channel="SWEEP", name=f"TR TO {dest}".strip(), branch=dest, ref=acc[-1] if acc else "")
+        return out
+    # Cash paid in at a branch counter: "CASH DEPOSIT VYPIN MURIKKUMPADAM", "CASH DEP/ALUVA"
+    m = re.match(r"^\s*CASH\s*DEP(?:OSIT(?:ED)?|\.)?\b\s*/?\s*(?:BY\s+)?(.*?)\s*/?\s*$", up)
+    if m:
+        br = re.sub(r"\s+", " ", m.group(1).replace("/", " ")).strip()
+        out.update(channel="CASH", name=("CASH DEPOSIT " + br).strip(), branch=br)
+        return out
     if up.startswith("BY CASH"):
         br = re.search(r"BR:\s*([^/]+)", up)
         out.update(channel="CASH", name="CASH DEPOSIT" + (f" {br.group(1).strip()}" if br else ""),

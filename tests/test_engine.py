@@ -1148,3 +1148,66 @@ def test_blank_statement_first_day_or_wrong_date_is_stopped(conn, tmp_path):
     with pytest.raises(engine.Blocked) as e:
         engine.reconcile(conn, 1, str(b), "b2", str(k), "k2", "t", confirmed=True)
     assert "BANK_BLANK_DATE" in {c["code"] for c in e.value.checks}
+
+
+def _collection(conn, acc_no="0058073000001140"):
+    conn.execute("UPDATE accounts SET kind='collection', branch='Valappu', acc_no=? WHERE id=1", (acc_no,))
+
+
+def _jlg(vno, name, amt, la):
+    return dict(vno=vno, name=name, loan_ac=la, receipt=amt,
+                narration=f"Received against loan, A/c: JLGL 1, A/c No: {la}, Name: {name}")
+
+
+def test_sweep_cash_jlg_and_after_hours_credit(conn, tmp_path):
+    """17-11-2026 Valappu: sweep 'TR TO HEAD OFFICE', a counter cash deposit, a JLG group paid by one member and
+    a credit after the sweep. All but the after-hours credit must pair; it waits for the next day's book."""
+    _collection(conn)
+    d1, d2 = date(2026, 11, 17), date(2026, 11, 18)
+    bank1 = [_upi("632100000001", "ANU K", 500), ("BY CASH BR:VYPIN MURIKKUMPADAM", 0, 27000),
+             _upi("632158715110", "JUDY POLYCARP", 2920), _upi("632100000002", "RANDOM PAYER", 730),
+             _upi("632100000003", "OTHER PAYER", 800),
+             ("TR TO HEAD OFFICE 73.1113", 31450, 0), _upi("668748245121", "PREETHY K B", 710)]
+    book1 = [dict(vno=1, name="ANU K", loan_ac="9", instr="0001", receipt=500),
+             dict(vno=583, vtype="CP", name="", receipt=27000, narration="CASH DEPOSIT, A/c: VCHR"),
+             _jlg(14051, "JUDY POLY", 730, "000804007001"), _jlg(14052, "SANDHYA VINOD", 730, "000804007002"),
+             _jlg(14053, "Shybi P P", 730, "000804007003"), _jlg(14054, "Thresia Sebastian", 730, "000804007004"),
+             _jlg(14060, "BEENA X", 730, "000804007010"), _jlg(14061, "SAJI Y", 800, "000804007011"),
+             dict(vno=1788, vtype="JV", name="", payment=31450, narration="TRANSFER TO MAIN BRANCH ACCOUNT, A/c: IBV")]
+    r1, bc, kc = _day(conn, tmp_path, 1, d1, 6600, bank1, book1)
+    got = {m[0]: m[1] for m in conn.execute("SELECT method, confidence FROM matches WHERE run_id=?", (r1,))}
+    assert got.get("Day-end sweep to head office + amount") == "strong"
+    assert got.get("Cash deposit + amount") == "strong"
+    assert got.get("Group payment (JLG): one credit = several members") == "strong"
+    assert any(m.startswith("Collections pooled") for m in got)                   # RANDOM + OTHER payer = 730 + 800
+    open_ = [(i["name"], i["amount"]) for i in engine.run_items(conn, r1) if not i["match_id"]]
+    assert open_ == [("PREETHY K B", 710.0)]
+    row = conn.execute("SELECT checks_json, flags_json FROM runs WHERE id=?", (r1,)).fetchone()
+    assert any(c["code"] == "BANK_AFTER_SWEEP" for c in json.loads(row[0]))
+    assert any("after the day-end sweep" in f["title"] for f in json.loads(row[1]))
+    # next day: the branch books Preethy (no UTR typed) with that day's other receipts
+    r2, _, _ = _day(conn, tmp_path, 2, d2, bc,
+                    [_upi("632200000001", "SOMEONE", 600), _upi("632200000002", "ANOTHER", 400)],
+                    [dict(vno=2, name="PREETHY K B MOTHER", loan_ac="5", receipt=710),
+                     dict(vno=3, name="X Y", loan_ac="6", receipt=600), dict(vno=4, name="Z W", loan_ac="7", receipt=400)],
+                    book_op=kc)
+    assert brs(conn, r2)["clean"]
+    assert conn.execute("SELECT COUNT(*) FROM items WHERE account_id=1 AND match_id IS NULL").fetchone()[0] == 0
+
+
+def test_first_day_opening_gap_is_previous_evening_after_hours(conn, tmp_path):
+    """14-11-2026 Varapuzha: first day; bank opening is ₹2,210 above book opening because the previous evening's
+    after-hours credits are in the bank balance and the branch books them today. No Manager needed."""
+    _collection(conn, "0058073000001141")
+    d = date(2026, 11, 14)
+    b, k = tmp_path / "b.xlsx", tmp_path / "k.xlsx"
+    write_statement(b, d, 9740, [_upi("631800000001", "PAYER ONE", 800), _upi("631800000002", "PAYER TWO", 500)])
+    write_book(k, d, 7530, [dict(vno=1, name="A", loan_ac="1", receipt=800), dict(vno=2, name="B", loan_ac="2", receipt=500),
+                            dict(vno=3, name="C", loan_ac="3", receipt=2000), dict(vno=4, name="D", loan_ac="4", receipt=210)],
+               branch="Varapuzha")
+    rid = run(conn, 1, b, k, confirmed=True)     # only the statement's missing account number is confirmed
+    row = conn.execute("SELECT * FROM runs WHERE id=?", (rid,)).fetchone()
+    assert row["opening_diff_added"] == 0 and brs(conn, rid)["clean"]
+    assert any(c["code"] == "OPENING_AFTER_HOURS" for c in json.loads(row["checks_json"]))
+    assert conn.execute("SELECT COUNT(*) FROM items WHERE run_id=? AND match_id IS NULL", (rid,)).fetchone()[0] == 0
+    assert any("after-hours" in a[0] for a in conn.execute("SELECT title FROM alerts"))

@@ -41,8 +41,23 @@ def bank_item(r: dict) -> dict:
         "date": r["date"], "amount": r["withdrawal"] or r["deposit"],
         "name": r["name"], "ref": r["ref"], "cheque": r["cheque"], "channel": r["channel"],
         "seq": r.get("seq", ""), "branch": r.get("branch", ""), "text": r["narration"], "row_no": r["row_no"], "sl": r["sl"],
-        "balance": r["balance"], "value_date": r["value_date"],
+        "balance": r["balance"], "value_date": r["value_date"], "after_hours": bool(r.get("after_hours")),
     }
+
+
+def mark_after_hours(rows: list[dict]) -> int:
+    """Collection accounts sweep the day's money to head office at day end. Credits listed after the day's last
+    sweep reached the bank after banking hours; the branch books them the next working day. Returns how many."""
+    last = {}
+    for i, r in enumerate(rows):
+        if r["withdrawal"] and r.get("channel") == "SWEEP":
+            last[r["date"]] = i
+    n = 0
+    for i, r in enumerate(rows):
+        if r["deposit"] and r["date"] in last and i > last[r["date"]]:
+            r["after_hours"] = True
+            n += 1
+    return n
 
 
 def book_names(book_path, book_name):
@@ -117,9 +132,13 @@ def alert_for_run(conn, run_id: int, user: str) -> int | None:
     timing = [f for f in flags if f["code"] in TIMING_CODES]
     late = [f for f in flags if f["code"] == "BOOK_LATE_POSTED"]
     esc = [f for f in flags if f["code"] in ESCALATED_CODES]
-    if not (timing or late or esc):
+    first = [c for c in json.loads(run["checks_json"] or "[]") if c["code"] == "OPENING_AFTER_HOURS"]
+    if not (timing or late or esc or first):
         return None
     parts, lines = [], []
+    if first:
+        parts.append("first day: opening gap taken as previous evening's after-hours credits")
+        lines.append(first[0]["message"])
     if timing:
         parts.append(f"{len(timing)} timing difference(s) ₹{inr(amt(timing))}")
         lines.append(f"Carried to the next working day (warning): {len(timing)} line(s), ₹{inr(amt(timing))}.")
@@ -447,6 +466,13 @@ def _reconcile(conn, account_id, bank_path, bank_name, book_path, book_name, use
             f"reconciliation. Bank closing for this day taken as ₹{inr(bank['closing'])}.")
     else:
         deferred = []
+    n_late = mark_after_hours(bank["rows"])
+    if n_late:
+        late = [r for r in bank["rows"] if r.get("after_hours")]
+        add("ok", "BANK_AFTER_SWEEP",
+            f"{n_late} credit(s) after the day-end sweep (after banking hours, ₹{inr(sum(r['deposit'] for r in late))}, "
+            f"e.g. {late[0]['narration'][:50]}). The branch books these on the next working day; they are kept out "
+            "of this day's collection total.")
     outside = [r for r in bank["rows"] if r["date"] < p_from or r["date"] > p_to]
     if outside:
         add("error", "PERIOD_MISMATCH",
@@ -592,7 +618,18 @@ def _reconcile(conn, account_id, bank_path, bank_name, book_path, book_name, use
     for it in backdated_new:
         it["side"] = "book"
     unexplained = round(bank["opening"] - book["opening"] - net_open(carried) - net_open(backdated_new) - prior_diff, 2)
-    if abs(unexplained) > TOL:
+    opening_late = 0.0
+    if abs(unexplained) > TOL and not last and acc["kind"] == "collection" and unexplained > TOL:
+        # First day of a collection account: the bank's opening already holds the previous evening's after-hours
+        # credits (they came after that day's sweep), which the branch books today. Bring them in as one
+        # open bank line dated the previous day; today's book receipts should cover it.
+        opening_late = unexplained
+        add("warning", "OPENING_AFTER_HOURS",
+            f"First reconciliation for this account: bank opening ₹{inr(bank['opening'])} is ₹{inr(unexplained)} more "
+            f"than book opening ₹{inr(book['opening'])}. Taken as the previous evening's after-hours credits (after "
+            "that day's sweep), which the branch books today. They are carried as one open bank line and must be "
+            "covered by today's book receipts; if not, it turns High. Managers and Admins are alerted.")
+    elif abs(unexplained) > TOL:
         if not last:
             add("warning", "OPENING_DIFF",
                 f"First reconciliation for this account: bank opening ₹{inr(bank['opening'])} and book opening "
@@ -618,7 +655,7 @@ def _reconcile(conn, account_id, bank_path, bank_name, book_path, book_name, use
         raise Blocked(all_checks + [dict(check("error", "ACK_REASON",
                       f"Write a proper reason (at least {MIN_REASON} characters) to proceed past these warnings."),
                       source="Cross-check")], ackable)
-    opening_added = unexplained if abs(unexplained) > TOL else 0.0
+    opening_added = unexplained if abs(unexplained) > TOL and not opening_late else 0.0
 
     # --- store (re-checked inside the write lock so a double-submit cannot create two runs)
     with db.tx(conn):
@@ -643,6 +680,19 @@ def _reconcile(conn, account_id, bank_path, bank_name, book_path, book_name, use
                                "VALUES (?,?,?,?,?,?,?,?,?)",
                                (run_id, account_id, "bank", it["dir"], it["date"].isoformat(), it["amount"],
                                 it["name"], it["ref"], db.dumps(it)))
+            new_items.append(dict(it, key=str(cur.lastrowid), id=cur.lastrowid, run_id=run_id))
+        if opening_late:
+            prev_day = p_from - timedelta(days=1)
+            it = {"side": "bank", "dir": "in", "date": prev_day, "amount": opening_late,
+                  "name": "Previous evening's after-hours credits (in the opening balance)", "ref": "", "cheque": "",
+                  "channel": "", "seq": "", "branch": "", "row_no": 0, "sl": "", "balance": bank["opening"],
+                  "value_date": prev_day, "after_hours": True, "opening_line": True,
+                  "text": f"Bank opening ₹{inr(bank['opening'])} − book opening ₹{inr(book['opening'])} on the first "
+                          "reconciled day: credits after the previous day's sweep"}
+            cur = conn.execute("INSERT INTO items (run_id, account_id, side, dir, date, amount, name, ref, data_json) "
+                               "VALUES (?,?,?,?,?,?,?,?,?)",
+                               (run_id, account_id, "bank", "in", prev_day.isoformat(), opening_late,
+                                it["name"], "", db.dumps(it)))
             new_items.append(dict(it, key=str(cur.lastrowid), id=cur.lastrowid, run_id=run_id))
         for r in book["rows"]:
             it = book_item(r)
@@ -1040,6 +1090,7 @@ def recheck_account(conn, account_id: int, user: str) -> dict:
         m.sweep_pass("in")
         m.renewal_pass()
         m.nach_pass()
+        m.jlg_group_pass()
         m.unique_amount_pass("in", min_amount=BIG_CREDIT, same_day_only=True)
         byk = {i["key"]: i for i in open_}
         first_run = None
