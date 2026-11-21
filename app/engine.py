@@ -22,6 +22,7 @@ DUP_LOOKBACK_DAYS = 60        # same loan account paid twice
 DUP_BENEFICIARY_DAYS = 20     # same payee + amount debited twice (monthly rent/salary stay out of range)
 MIN_REASON = 15
 _RUN_LOCK = threading.Lock()   # one reconciliation at a time (single-process server)
+MAINTENANCE = ""               # set while a one-time rebuild runs: the app is read-only meanwhile
 
 
 class Blocked(Exception):

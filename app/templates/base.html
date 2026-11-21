@@ -54,6 +54,7 @@
       </div>
     </header>
     <main>
+      {% if maintenance %}<div class="flash warn">{{ maintenance }}</div>{% endif %}
       {% if flash %}<div class="flash {{ flash.kind }}">{{ flash.msg }}</div>{% endif %}
       {% block content %}{% endblock %}
     </main>

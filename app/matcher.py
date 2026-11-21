@@ -589,7 +589,7 @@ class Matcher:
 
     def unique_amount_pass(self, direction, min_amount=0.0, same_day_only=False):
         """Only one bank and one book line left with this amount (within the date window).
-        Strong when the bank's name is written in the book narration (e.g. 'PAID TO VARGHESE K O'),
+        Strong when the bank's name is written in the book narration (e.g. 'PAID TO MATHEW P J'),
         or the credit is a transfer between the company's own accounts; otherwise Verify."""
         banks = [b for b in self.free(self.bank, direction) if b["amount"] >= min_amount]
         books = [k for k in self.free(self.book, direction) if k["amount"] >= min_amount]
@@ -906,19 +906,16 @@ def build_flags(bank: list[dict], book: list[dict], matches: list[dict], account
             mism.append((m, bs, bad))
         else:
             verified += 1
-    for m, bs, bad in mism[:40]:
-        f("medium", "TXN_ID_MISMATCH", "Transaction ID entered in the ERP does not match the bank",
-          f"Bank credit ₹{inr(sum(b['amount'] for b in bs))} from {bs[0]['name'] or '—'} has transaction ID "
-          f"{', '.join(b.get('ref') or '' for b in bs)}, but the ERP entry "
-          + "; ".join(f"Vchr {k['vno']} {k['name']} carries …{i[-4:]}" for k, i in bad[:3])
-          + f". Matched by '{m['method']}'. Check the receipt was posted against the right payment.",
-          [*m["bank"], *m["book"]])
-    if len(mism) > 40:
-        f("medium", "TXN_ID_MISMATCH", f"{len(mism) - 40} more transaction-ID mismatches", "See the Collections tab.", [])
+    # Dynamic UPI QR codes and payment apps often show the customer a different number from the bank's UTR,
+    # so a different last-4 is not an exception: one information line lists them for reference (decided 21-11-2026).
     if checked:
-        f("info", "TXN_ID_CHECK", f"Transaction ID verified on {verified} of {checked} matched collection(s)",
-          "For every collection that has a transaction ID on both sides, the last 4 digits typed in the ERP were "
-          f"compared with the bank's UTR / transaction ID. {len(mism)} did not agree.", [])
+        f("info", "TXN_ID_CHECK", f"Transaction ID agreed on {verified} of {checked} matched collection(s)",
+          "For every collection with a transaction ID on both sides, the last 4 digits typed in the ERP were compared "
+          f"with the bank's UTR. {len(mism)} differ, which is normal with dynamic UPI and is not treated as an exception"
+          + (": " + "; ".join(f"{bs[0]['name'] or '—'} ₹{inr(sum(b['amount'] for b in bs))} (bank …"
+                              f"{(bs[0].get('ref') or '')[-4:]}, ERP …{bad[0][1][-4:]})" for m, bs, bad in mism[:15])
+             + (f"; and {len(mism) - 15} more" if len(mism) > 15 else "") + "." if mism else "."),
+          [k for m, bs, bad in mism for k in (*m["bank"], *m["book"])])
 
     # returned disbursals: the borrower was NOT paid, whatever the matching says
     for b in bank:

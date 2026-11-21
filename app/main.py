@@ -6,6 +6,9 @@ import os
 import re
 import secrets
 import shutil
+import sqlite3
+import sys
+import threading
 import time
 from datetime import date, datetime
 from pathlib import Path
@@ -16,7 +19,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from starlette.middleware.sessions import SessionMiddleware
 
-from . import accounts_import, auth, batch, db, engine, report, roles, sso
+from . import accounts_import, auth, batch, db, engine, rebuild, report, roles, sso
 from .parsers import inr
 
 BASE = Path(__file__).resolve().parent
@@ -69,6 +72,42 @@ try:
         db.set_setting(_c, "recheck_2026_11_19", db.now())
 except Exception as _e:  # never stop the app from starting
     print("re-check skipped:", _e)
+# One-time (21-11-2026): rebuild every day reconciled since the 16-11 fresh start from the files the server kept,
+# with the 19-11 rules (after-hours credits, sweeps, cash deposits, JLG groups), as Kev asked. Runs in the background
+# after start-up; the app is read-only until it finishes. A database backup is written first.
+def _rebuild_job():
+    c = db.connect()
+    try:
+        if db.get_setting(c, "rebuild_2026_11_21"):
+            return
+        db.set_setting(c, "rebuild_2026_11_21", "started " + db.now())
+        if not c.execute("SELECT 1 FROM runs").fetchone():
+            db.set_setting(c, "rebuild_2026_11_21", "nothing to rebuild " + db.now())
+            return
+        engine.MAINTENANCE = ("Reconciliations since 16-11 are being rebuilt with the new matching rules. The app "
+                              "is read-only until that finishes; please try again in a few minutes.")
+        bk = db.DATA_DIR / "backups"
+        bk.mkdir(parents=True, exist_ok=True)
+        dst = sqlite3.connect(str(bk / f"before-rebuild_{datetime.now():%Y-%m-%d_%H%M%S}.sqlite3"))
+        try:
+            c.backup(dst)
+        finally:
+            dst.close()
+        res = rebuild.run(c, db.DATA_DIR / "uploads", "2026_11_21")
+        db.set_setting(c, "rebuild_2026_11_21", f"done {db.now()}: {len(res['rebuilt'])} rebuilt, {len(res['left'])} left")
+        print("rebuild done:", res)
+    except Exception as e:  # never take the app down; leave a trace
+        print("rebuild failed:", e)
+        try:
+            db.audit(c, "system", "rebuild_failed", str(e)[:1000])
+            db.set_setting(c, "rebuild_2026_11_21", f"failed {db.now()}: {e}"[:500])
+        except Exception:
+            pass
+    finally:
+        engine.MAINTENANCE = ""
+        c.close()
+
+
 # One-time (20-10-2026): the ICICI collection account (NACH, dynamic UPI); its balance is swept to SIB …1113.
 try:
     if not db.get_setting(_c, "seed_icici_0993"):
@@ -107,6 +146,8 @@ try:
 except Exception as _e:
     print("re-check skipped:", _e)
 _c.close()
+if "pytest" not in sys.modules:   # tests call the job themselves
+    threading.Thread(target=_rebuild_job, name="rebuild", daemon=True).start()
 
 app = FastAPI(title="Bank Reconciliation", docs_url=None, redoc_url=None, openapi_url=None)
 app.add_middleware(SessionMiddleware, secret_key=auth.secret_key(), max_age=8 * 3600, same_site="strict",
@@ -132,6 +173,19 @@ templates.env.filters["dmy"] = _dmy
 templates.env.globals["now"] = datetime.now
 templates.env.globals["base"] = ROOT_PATH
 templates.env.globals["asset_v"] = str(int(max(p.stat().st_mtime for p in (BASE / "static").rglob("*") if p.is_file())))
+
+
+MAINTENANCE_PATHS = ("/reconcile", "/runs/", "/admin/revoke", "/admin/recheck", "/accounts")
+
+
+@app.middleware("http")
+async def maintenance_guard(request: Request, call_next):
+    """While the one-time rebuild runs, nothing that changes reconciliations is accepted."""
+    if engine.MAINTENANCE and request.method == "POST":
+        p = request.url.path[len(ROOT_PATH):] if request.url.path.startswith(ROOT_PATH) else request.url.path
+        if p.startswith(MAINTENANCE_PATHS):
+            return RedirectResponse(ROOT_PATH + "/?busy=1", status_code=303)   # the banner says why
+    return await call_next(request)
 
 
 @app.middleware("http")
@@ -182,6 +236,7 @@ def render(request: Request, name: str, **ctx):
                flash=request.session.pop("flash", None), role=role,
                role_label=roles.LABELS.get(role, ""), full_name=getattr(request.state, "full_name", ""),
                can=lambda perm: roles.can(role, perm))
+    ctx["maintenance"] = engine.MAINTENANCE
     ctx["inbox_unread"] = 0
     if roles.can(role, "inbox") and user(request):
         c = conn()

@@ -272,6 +272,7 @@ tr.sub td { border-bottom-color: transparent; }
 .flash { padding: 11px 14px; border-radius: 12px; margin-bottom: 18px; font-weight: 500; }
 .flash.ok { background: var(--ok-soft); color: var(--ok); }
 .flash.error { background: var(--bad-soft); color: var(--bad); }
+.flash.warn { background: var(--warn-soft); color: var(--warn); }
 
 /* selection bar for manual matching */
 .selbar { position: sticky; bottom: 0; background: var(--black); color: #fff; padding: 12px 20px; display: none; gap: 16px; align-items: center; flex-wrap: wrap; z-index: 5; }

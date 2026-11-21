@@ -627,20 +627,20 @@ def test_signoff_maker_checker(conn, tmp_path):
 def test_renewal_net_settlement(conn, tmp_path):
     d = date(2026, 9, 29)
     rid, _, _ = _day(conn, tmp_path, 1, d, 1_000_000, [
-        ("RAP/626900000001/ 0000095001 /ANANDA PADMANABHAN/", 29500, 0),
+        ("RAP/626900000001/ 0000095001 /ARUN PRAKASH/", 29500, 0),
         ("RAP/626900000002/ 0000095002 /MINI JOSE/", 10000, 0),
         ("UPI/SBIN/626900007777/MINI JOSE/UPI/x/p@ok", 0, 5000),
     ], [
-        dict(vno=11, name="ANANDA PADMANABHAN", loan_ac="00110400700000000275", payment=180000),
-        dict(vno=12, name="ANANDA PADMANABHAN", loan_ac="00110400700000000261", receipt=150500),
+        dict(vno=11, name="ARUN PRAKASH", loan_ac="00110400700000000275", payment=180000),
+        dict(vno=12, name="ARUN PRAKASH", loan_ac="00110400700000000261", receipt=150500),
         # MINI's "closure" carries a real UPI ref that is on a bank credit: it is a collection, not a renewal
         dict(vno=13, name="MINI JOSE", loan_ac="0021", payment=15000),
         dict(vno=14, name="MINI JOSE", loan_ac="0022", instr="7777", receipt=5000),
     ])
     items = engine.run_items(conn, rid)
     m_of = {i["name"] + str(i["amount"]): i["match_id"] for i in items}
-    mid = m_of["ANANDA PADMANABHAN29500.0"]
-    assert mid and m_of["ANANDA PADMANABHAN180000.0"] == mid and m_of["ANANDA PADMANABHAN150500.0"] == mid
+    mid = m_of["ARUN PRAKASH29500.0"]
+    assert mid and m_of["ARUN PRAKASH180000.0"] == mid and m_of["ARUN PRAKASH150500.0"] == mid
     row = conn.execute("SELECT method, confidence, note FROM matches WHERE id=?", (mid,)).fetchone()
     assert row[0] == "Renewal — net settled" and row[1] == "review" and "1,50,500.00" in row[2]
     f = [x for x in flags(conn, rid) if x["code"] == "RENEWAL_NETTED"]
@@ -697,12 +697,12 @@ def test_exception_reviews_search_and_excel(conn, tmp_path):
 def test_recheck_applies_new_rules_to_old_runs(conn, tmp_path):
     d1, d2 = date(2026, 9, 28), date(2026, 9, 29)
     r1, bc, kc = _day(conn, tmp_path, 1, d1, 1_000_000, [
-        ("RAP/626900000001/ 0000095001 /ANANDA PADMANABHAN/", 29500, 0),
+        ("RAP/626900000001/ 0000095001 /ARUN PRAKASH/", 29500, 0),
         ("TR FROM KANICHUKULANGARA BRANCH 58.73.1137", 0, 45000),
         _upi("626900001111", "ASHA", 100),
     ], [
-        dict(vno=11, name="ANANDA PADMANABHAN", loan_ac="0275", payment=180000),
-        dict(vno=12, name="ANANDA PADMANABHAN", loan_ac="0261", receipt=150500),
+        dict(vno=11, name="ARUN PRAKASH", loan_ac="0275", payment=180000),
+        dict(vno=12, name="ARUN PRAKASH", loan_ac="0261", receipt=150500),
         dict(vno=13, name="", vtype="BR", receipt=45000, narration="Sweep received from Kanichu"),
         dict(vno=14, name="ASHA", loan_ac="1", instr="1111", receipt=100),
     ])
@@ -767,13 +767,13 @@ def test_excel_bank_statement_has_customer_name(conn, tmp_path):
     import openpyxl
     from app import report
     rid, _, _ = _day(conn, tmp_path, 1, date(2026, 9, 29), 100000, [
-        ("RAP/627311185948/ 0000095504 /VIJAYKRISHNA K R/", 37882, 0), ("DIVIN BIJU/", 1000, 0)],
-        [dict(vno=1, name="VIJAYKRISHNA K R", loan_ac="1", payment=37882)])
+        ("RAP/627300000048/ 0000095504 /RAHUL MENON K/", 37882, 0), ("SAJAN THOMAS/", 1000, 0)],
+        [dict(vno=1, name="RAHUL MENON K", loan_ac="1", payment=37882)])
     data, _ = report.build_report(conn, rid)
     ws = openpyxl.load_workbook(BytesIO(data))["Bank Statement"]
     assert [c.value for c in ws[1]][2:5] == ["Particulars", "Customer name", "Withdrawal"]
     names = [row[3].value for row in ws.iter_rows(min_row=2)]
-    assert names[:2] == ["VIJAYKRISHNA K R", "DIVIN BIJU"]
+    assert names[:2] == ["RAHUL MENON K", "SAJAN THOMAS"]
 
 
 def test_midnight_next_day_line_left_out_and_carried(conn, tmp_path):
@@ -939,7 +939,9 @@ def test_two_bank_books_nach_settlement_and_txn_id(conn, tmp_path):
     assert any(m.startswith("NACH settlement") for m in methods)
     assert conn.execute("SELECT COUNT(*) FROM items WHERE run_id=? AND match_id IS NULL", (rid,)).fetchone()[0] == 0
     codes = [f["code"] for f in json.loads(r["flags_json"])]
-    assert codes.count("TXN_ID_MISMATCH") == 1 and "TXN_ID_CHECK" in codes
+    assert "TXN_ID_MISMATCH" not in codes and "TXN_ID_CHECK" in codes          # dynamic UPI: information only
+    chk = [f for f in json.loads(r["flags_json"]) if f["code"] == "TXN_ID_CHECK"][0]
+    assert chk["severity"] == "info" and "1 differ" in chk["detail"] and "BINU" in chk["detail"]
     items = [i for i in engine.run_items(conn, rid) if i["side"] == "book"]
     assert {i["book_name"] for i in items} == {"upi.xlsx", "nach.xlsx"}
 
@@ -991,11 +993,11 @@ def test_large_own_transfer_and_name_in_narration_pair(conn, tmp_path):
     d = date(2026, 9, 29)
     rid, _, _ = _day(conn, tmp_path, 1, d, 1000000,
                      [("FREEMEN INVESTMENTS PRIVATE LIMITED", 0, 81030000), _upi("626900001111", "ASHA", 740),
-                      ("RTGS TO:SIBLH26272448778:K O VARGHESE", 70000000, 0)],
+                      ("RTGS TO:SIBLH26272448778:P J MATHEW", 70000000, 0)],
                      [dict(vno=1, vtype="JV", name="", receipt=81030000,
                            narration="AMOUNT TRANSFERED TO SIB 1113 81030000/-, A/c: IBV"),
                       dict(vno=2, name="BEENA", loan_ac="2", instr="9999", receipt=800),
-                      dict(vno=3, name="", payment=70000000, narration="PART OF THE LOAN AMOUNT PAID TO VARGHESE K O")])
+                      dict(vno=3, name="", payment=70000000, narration="PART OF THE LOAN AMOUNT PAID TO MATHEW P J")])
     got = {m[0]: m[1] for m in conn.execute("SELECT method, confidence FROM matches WHERE run_id=?", (rid,))}
     assert got.get("Own-account transfer (unique on the day)") == "strong"
     assert got.get("Amount + name in narration (unique on the day)") == "strong"
@@ -1047,10 +1049,10 @@ def test_inbox_alerts_managers_not_operators(conn, tmp_path):
 def test_operator_confirms_first_day_and_managers_are_alerted(conn, tmp_path):
     admin = _client_setup()
     t = _tok(admin, "/admin")
-    admin.post("/admin/users", data={"username": "neethu", "full_name": "Neethu", "role": "operator",
+    admin.post("/admin/users", data={"username": "opuser", "full_name": "Op User", "role": "operator",
                                      "password": "Temp-pass-123", "csrf_token": t})
-    op, _ = _login("neethu", "Temp-pass-123")
-    op.post("/password", data={"current": "Temp-pass-123", "new": "neethu-own-pw1", "new2": "neethu-own-pw1",
+    op, _ = _login("opuser", "Temp-pass-123")
+    op.post("/password", data={"current": "Temp-pass-123", "new": "opuser-own-pw1", "new2": "opuser-own-pw1",
                                "csrf_token": _tok(op, "/me")})
     d = date(2026, 10, 19)
     b, k = tmp_path / "b.xlsx", tmp_path / "k.xlsx"
@@ -1066,7 +1068,7 @@ def test_operator_confirms_first_day_and_managers_are_alerted(conn, tmp_path):
                                         "csrf_token": _tok(op, "/reconcile")})
     assert r.status_code == 303 and "/runs/" in r.headers["location"]
     al = conn.execute("SELECT title, body FROM alerts").fetchall()
-    assert any("confirmed by neethu" in a[0] and "starting point agreed" in a[1] for a in al)
+    assert any("confirmed by opuser" in a[0] and "starting point agreed" in a[1] for a in al)
 
 
 def test_first_day_with_matching_account_number_needs_no_confirmation(conn, tmp_path):
@@ -1165,13 +1167,13 @@ def test_sweep_cash_jlg_and_after_hours_credit(conn, tmp_path):
     _collection(conn)
     d1, d2 = date(2026, 11, 17), date(2026, 11, 18)
     bank1 = [_upi("632100000001", "ANU K", 500), ("BY CASH BR:VYPIN MURIKKUMPADAM", 0, 27000),
-             _upi("632158715110", "JUDY POLYCARP", 2920), _upi("632100000002", "RANDOM PAYER", 730),
+             _upi("632100000005", "LEENA PAULOSE", 2920), _upi("632100000002", "RANDOM PAYER", 730),
              _upi("632100000003", "OTHER PAYER", 800),
-             ("TR TO HEAD OFFICE 73.1113", 31450, 0), _upi("668748245121", "PREETHY K B", 710)]
+             ("TR TO HEAD OFFICE 73.1113", 31450, 0), _upi("668700000021", "BINDHU K S", 710)]
     book1 = [dict(vno=1, name="ANU K", loan_ac="9", instr="0001", receipt=500),
              dict(vno=583, vtype="CP", name="", receipt=27000, narration="CASH DEPOSIT, A/c: VCHR"),
-             _jlg(14051, "JUDY POLY", 730, "000804007001"), _jlg(14052, "SANDHYA VINOD", 730, "000804007002"),
-             _jlg(14053, "Shybi P P", 730, "000804007003"), _jlg(14054, "Thresia Sebastian", 730, "000804007004"),
+             _jlg(14051, "LEENA PAUL", 730, "000804007001"), _jlg(14052, "ANJU RAJAN", 730, "000804007002"),
+             _jlg(14053, "Mini P K", 730, "000804007003"), _jlg(14054, "Rosy Thomas", 730, "000804007004"),
              _jlg(14060, "BEENA X", 730, "000804007010"), _jlg(14061, "SAJI Y", 800, "000804007011"),
              dict(vno=1788, vtype="JV", name="", payment=31450, narration="TRANSFER TO MAIN BRANCH ACCOUNT, A/c: IBV")]
     r1, bc, kc = _day(conn, tmp_path, 1, d1, 6600, bank1, book1)
@@ -1181,14 +1183,14 @@ def test_sweep_cash_jlg_and_after_hours_credit(conn, tmp_path):
     assert got.get("Group payment (JLG): one credit = several members") == "strong"
     assert any(m.startswith("Collections pooled") for m in got)                   # RANDOM + OTHER payer = 730 + 800
     open_ = [(i["name"], i["amount"]) for i in engine.run_items(conn, r1) if not i["match_id"]]
-    assert open_ == [("PREETHY K B", 710.0)]
+    assert open_ == [("BINDHU K S", 710.0)]
     row = conn.execute("SELECT checks_json, flags_json FROM runs WHERE id=?", (r1,)).fetchone()
     assert any(c["code"] == "BANK_AFTER_SWEEP" for c in json.loads(row[0]))
     assert any("after the day-end sweep" in f["title"] for f in json.loads(row[1]))
-    # next day: the branch books Preethy (no UTR typed) with that day's other receipts
+    # next day: the branch books Bindhu (no UTR typed) with that day's other receipts
     r2, _, _ = _day(conn, tmp_path, 2, d2, bc,
                     [_upi("632200000001", "SOMEONE", 600), _upi("632200000002", "ANOTHER", 400)],
-                    [dict(vno=2, name="PREETHY K B MOTHER", loan_ac="5", receipt=710),
+                    [dict(vno=2, name="BINDHU K S MOTHER", loan_ac="5", receipt=710),
                      dict(vno=3, name="X Y", loan_ac="6", receipt=600), dict(vno=4, name="Z W", loan_ac="7", receipt=400)],
                     book_op=kc)
     assert brs(conn, r2)["clean"]
@@ -1211,3 +1213,71 @@ def test_first_day_opening_gap_is_previous_evening_after_hours(conn, tmp_path):
     assert any(c["code"] == "OPENING_AFTER_HOURS" for c in json.loads(row["checks_json"]))
     assert conn.execute("SELECT COUNT(*) FROM items WHERE run_id=? AND match_id IS NULL", (rid,)).fetchone()[0] == 0
     assert any("after-hours" in a[0] for a in conn.execute("SELECT title FROM alerts"))
+
+
+def test_rebuild_from_kept_files(conn, tmp_path, monkeypatch):
+    """21-11-2026: days saved with the old rules are reconciled again from the kept uploads; an account whose
+    files were not kept is left exactly as it was and reported."""
+    from app import main, matcher, rebuild
+    _collection(conn)
+    d1, d2 = date(2026, 11, 17), date(2026, 11, 18)
+    up = db.DATA_DIR / "uploads"
+
+    def keep(rid, b, k):                      # what the server does with KEEP_UPLOADS=1
+        r = conn.execute("SELECT bank_file, book_file FROM runs WHERE id=?", (rid,)).fetchone()
+        (up / str(rid)).mkdir(parents=True, exist_ok=True)
+        shutil.copy(b, up / str(rid) / r["bank_file"])
+        shutil.copy(k, up / str(rid) / r["book_file"])
+
+    old = (matcher.Matcher._typed_transfer, matcher.Matcher.jlg_group_pass)
+    monkeypatch.setattr(matcher.Matcher, "_typed_transfer", lambda *a, **k: None)   # the rules before 19-11
+    monkeypatch.setattr(matcher.Matcher, "jlg_group_pass", lambda *a: None)
+    b1, k1 = tmp_path / "s17.xlsx", tmp_path / "b17.xlsx"
+    bc = write_statement(b1, d1, 6600, [_upi("632100000001", "ANU K", 500), ("BY CASH BR:VYPIN", 0, 27000),
+                                        ("TR TO HEAD OFFICE 73.1113", 27500, 0)])
+    kc = write_book(k1, d1, 6600, [dict(vno=1, name="ANU K", loan_ac="9", instr="0001", receipt=500),
+                                   dict(vno=583, vtype="CP", name="", receipt=27000, narration="CASH DEPOSIT, A/c: VCHR"),
+                                   dict(vno=9, vtype="JV", name="", payment=27500,
+                                        narration="TRANSFER TO MAIN BRANCH ACCOUNT, A/c: IBV")], branch="Valappu")
+    r1 = run(conn, 1, b1, k1, confirmed=True)
+    keep(r1, b1, k1)
+    b2, k2 = tmp_path / "s18.xlsx", tmp_path / "b18.xlsx"
+    write_statement(b2, d2, bc, [_upi("632200000001", "BINU", 300)])
+    write_book(k2, d2, kc, [dict(vno=2, name="BINU", loan_ac="8", instr="0001", receipt=300)], branch="Valappu")
+    r2 = run(conn, 1, b2, k2, confirmed=True)
+    keep(r2, b2, k2)
+    # account 2: a day whose files were not kept
+    b3, k3 = tmp_path / "c17.xlsx", tmp_path / "d17.xlsx"
+    write_statement(b3, d1, 100, [_upi("632100000009", "CHITRA", 50)])
+    write_book(k3, d1, 100, [dict(vno=1, name="CHITRA", loan_ac="7", instr="0009", receipt=50)])
+    r3 = run(conn, 2, b3, k3, confirmed=True)
+    open_before = conn.execute("SELECT COUNT(*) FROM items WHERE account_id=1 AND match_id IS NULL").fetchone()[0]
+    assert open_before == 2                                    # the cash deposit, both sides, left open
+    monkeypatch.setattr(matcher.Matcher, "_typed_transfer", old[0])
+    monkeypatch.setattr(matcher.Matcher, "jlg_group_pass", old[1])
+
+    main._rebuild_job()
+    assert engine.MAINTENANCE == ""
+    runs = conn.execute("SELECT id, period_to, created_by FROM runs WHERE account_id=1 ORDER BY period_to").fetchall()
+    assert [r["period_to"] for r in runs] == ["2026-11-17", "2026-11-18"] and runs[0]["id"] not in (r1, r2)
+    assert conn.execute("SELECT COUNT(*) FROM items WHERE account_id=1 AND match_id IS NULL").fetchone()[0] == 0
+    assert (up / str(runs[0]["id"]) / "s17.xlsx").is_file() and not (up / str(r1)).exists()
+    assert conn.execute("SELECT COUNT(*) FROM revoked_runs WHERE account_id=1").fetchone()[0] == 2
+    assert conn.execute("SELECT id FROM runs WHERE account_id=2").fetchone()[0] == r3        # untouched
+    a = conn.execute("SELECT title, body FROM alerts WHERE run_id IS NULL ORDER BY id DESC").fetchone()
+    assert "1 account(s), 1 left" in a["title"] and "not kept" in a["body"]
+    assert db.get_setting(conn, "rebuild_2026_11_21").startswith("done")
+    assert len(list((db.DATA_DIR / "backups").glob("before-rebuild_*.sqlite3"))) == 1
+    main._rebuild_job()                                        # once only
+    assert conn.execute("SELECT COUNT(*) FROM revoked_runs WHERE account_id=1").fetchone()[0] == 2
+
+
+def test_app_is_read_only_while_rebuilding(conn, monkeypatch):
+    admin = _client_setup()
+    t = _tok(admin, "/reconcile")
+    monkeypatch.setattr(engine, "MAINTENANCE", "Rebuilding.")
+    assert "Rebuilding." in admin.get("/").text
+    r = admin.post("/reconcile", data={"account_id": "1", "csrf_token": t, "confirm_backdated": "1"},
+                   follow_redirects=False)
+    assert r.status_code == 303 and r.headers["location"].endswith("/?busy=1")
+    assert not conn.execute("SELECT 1 FROM runs").fetchone()

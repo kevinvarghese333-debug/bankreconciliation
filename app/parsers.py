@@ -203,7 +203,7 @@ def parse_narration(text: str) -> dict:
                    branch=br.group(1).strip() if br else "")
         return out
     if up.startswith("RTGS") or up.startswith("NEFT TO") or up.startswith("NEFT FROM"):
-        # "RTGS TO:SIBLH26272448778:K O VARGHESE/"
+        # "RTGS TO:SIBLH26270000001:P J MATHEW/"
         bits = [b.strip() for b in re.split(r"[:/]", t) if b.strip()]
         ref = next((b for b in bits if re.fullmatch(r"[A-Z]{4}[A-Z0-9]{8,}|\d{12,}", b.upper())), "")
         names = [b for b in bits[1:] if b != ref and re.search(r"[A-Za-z]{3,}", b)]
